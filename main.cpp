@@ -2,9 +2,9 @@
 // Created by 叶卓杨 on 2021/5/8.
 //
 
-#include "core/BSpline.cpp"
-#include "core/Spline_curve_fitting.cpp"
-#include "readWrite.cpp"
+#include "core/BSpline.h"
+#include "core/Spline_curve_fitting.h"
+#include "readWrite.h"
 
 #include <iostream>
 
@@ -29,23 +29,28 @@ int main(int argc, char *argv[]){
     else input    = argv[0];
 
     string inFileName( input );
-    string outFileName1 = inFileName + "_controls.txt";
-    string outFileName2 = inFileName + "_spline.txt";
-
-    BSplineCurve curve(0.002);
-    Spline_curve_fitting scf;
+    string outFileName1 = "01_controls.txt";
+    string outFileName2 = "01_spline.txt";
 
 
-    std::vector<Vector2d> points;
+    BSplineSurface surface(3,3,9,9,0.01);
+
+
+    std::vector<Vector3d> points;
     readWrite::readData( inFileName, points );
-//    for(int i=0;i<points.size();i++)
-//		printf("%f %f\n",points[i].x,points[i].y); 
+    auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
 
-    scf.apply(points, curve, 28, 50, 0.005, 0.005, 0.0001, SPHERE_INIT);
+    cloud->points.reserve(points.size());
+    for (const auto& vec : points) {
+        // Eigen(double) -> PCL(float) 会自动隐式转换
+        cloud->points.emplace_back(vec.x(), vec.y(), vec.z());
+    }
 
+    surface.apply(cloud, 50,1,1,0.5);
+    std::cout<<"apply"<<endl;
 //	CReadWriteAsc::writeAsc( inFileName, points);
-    readWrite::writeDate( outFileName1, curve.getControls());
-    readWrite::writeDate( outFileName2, curve.getSamples() );
+    readWrite::writeDate( outFileName1, surface.getControls());
+    readWrite::writeDate( outFileName2, surface.getSamples() );
 
 
 

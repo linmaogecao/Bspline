@@ -16,10 +16,10 @@ using namespace Eigen;
 
 class readWrite {
 public:
-    static bool readData(const string& filename, vector<Vector2d>& points);
+    static bool readData(const string& filename, vector<Vector3d>& points);
 
 
-    static bool writeDate(const string& filename,const vector<Vector2d>& points);
+    static bool writeDate(const string& filename,const vector<Vector3d>& points);
 
 
 

@@ -42,6 +42,7 @@ Vector2d BSplineCurve::getPos(const Parameter &para) const {
     for( int i = 0; i < 4; i++)
     {
         pm(i,0) = controls_[(ki+i)%n].x()/6.0;
+        pm(i,1) = controls_[(ki+i)%n].y()/6.0;
     }
     MatrixXd rm = tm*cm*pm;
 
@@ -217,7 +218,7 @@ VectorXd BSplineCurve::getCoffe(const Parameter &para) const {
     return newv;
 }
 
-bool BSplineCurve::checkSameSide(Vector2d p1, Vector2d p2, Vector2d neip) {
+bool BSplineCurve:: checkSameSide(Vector2d p1, Vector2d p2, Vector2d neip) {
     Vector2d v1 = p2 - neip;
     Vector2d v2 = p1 - neip;
     bool b = true;
