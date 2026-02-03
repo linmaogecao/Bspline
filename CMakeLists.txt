@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PCL_DIR "/opt/pcl-1.13/share/pcl-1.13")
-find_package(PCL REQUIRED COMPONENTS common io)
+find_package(PCL REQUIRED COMPONENTS common io kdtree search)
 add_definitions(${PCL_DEFINITIONS})
 link_directories(${PCL_LIBRARY_DIRS})
 
@@ -50,6 +50,8 @@ else()
     message(FATAL_ERROR "ANN library not found even though apt says it is installed!")
 endif()
 
+find_package(OpenMP REQUIRED)
+
 # 4. Include Directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -75,6 +77,8 @@ set(HEADER_FILES
     core/Spline_curve_fitting.h
     readWrite.h
         core/BSplineSDMErr.h
+        core/RangeMap.cpp
+        core/RangeMap.h
 )
 
 # 7. Create Executable
@@ -85,4 +89,5 @@ target_link_libraries(spline_fitting_test
     ${ANN_LIBRARY}
     ${PCL_LIBRARIES}
     Ceres::ceres
+    OpenMP::OpenMP_CXX
 )

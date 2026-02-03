@@ -256,7 +256,6 @@ double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<
             iDim);
 
     double squareSum = 0.0;
-    std::cout<<"givepoints"<<givepoints.size()<<endl;
     for( int i = 0 ;i!= (int)givepoints.size(); ++i) {
         queryPt[0] = givepoints[i].x();
         queryPt[1] = givepoints[i].y();
@@ -309,24 +308,32 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
     pcl::getMinMax3D(*cloud, min_pt_4f, max_pt_4f);
     Vector3d min_pt(min_pt_4f[0], min_pt_4f[1], min_pt_4f[2]);
     Vector3d max_pt(max_pt_4f[0], max_pt_4f[1], max_pt_4f[2]);
+    max_x = max_pt(0); min_x = min_pt(0);
+    max_y = max_pt(1); min_y = min_pt(1);
+    max_z = max_pt(2); min_z = min_pt(2);
+    std::cout <<max_x<<" "<<max_y<<" "<<max_z<<min_x<<" "<<min_y<<" "<<min_z<<endl;
     Vector3d range = max_pt - min_pt;
-    Vector3d margin = range * 0.1;
+    Vector3d margin = range * 0.15;
     min_pt -= margin;
     max_pt += margin;
     range = max_pt - min_pt;
     int axis_u, axis_v, axis_h;
-    if (range.x() <= range.y() && range.x() <= range.z()) {
-        axis_h = 0; axis_u = 1; axis_v = 2; // u=y, v=z
-    }
-    else if (range.y() <= range.x() && range.y() <= range.z()) {
-        axis_h = 1; axis_u = 0; axis_v = 2; // u=x, v=z
-    }
-    else {
-        axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
-    }
+    // if (range.x() <= range.y() && range.x() <= range.z()) {
+    //     axis_h = 0; axis_u = 1; axis_v = 2; // u=y, v=z
+    // }
+    // else if (range.y() <= range.x() && range.y() <= range.z()) {
+    //     axis_h = 1; axis_u = 0; axis_v = 2; // u=x, v=z
+    // }
+    // else {
+    //     axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
+    // }
+    axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
+    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+    kdtree.setInputCloud(cloud);
+
     double u_step = range[axis_u] / (num_u - 1);
     double v_step = range[axis_v] / (num_v - 1);
-    double h_mean = (min_pt[axis_h] + max_pt[axis_h]) / 2;
+    double h_query = min_pt[axis_h];
     for (int i = 0; i < num_u; ++i) {
         for (int j = 0; j < num_v; ++j) {
             double cur_u = min_pt[axis_u] + i * u_step;
@@ -335,10 +342,33 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
             Vector3d pos;
             pos(axis_u) = cur_u;
             pos(axis_v) = cur_v;
-            pos(axis_h) = h_mean;
+            pcl::PointXYZ searchPoint;
+            searchPoint.x = (axis_u == 0) ? cur_u : ((axis_v == 0) ? cur_v : 0);
+            searchPoint.y = (axis_u == 1) ? cur_u : ((axis_v == 1) ? cur_v : 0);
+            searchPoint.z = (axis_u == 2) ? cur_u : ((axis_v == 2) ? cur_v : 0);
+            if(axis_h == 0) searchPoint.x = h_query;
+            else if(axis_h == 1) searchPoint.y = h_query;
+            else searchPoint.z = h_query;
+            std::vector<int> pointIdxNKNSearch(1);
+            std::vector<float> pointNKNSquaredDistance(1);
+            if (kdtree.nearestKSearch(searchPoint, 1, pointIdxNKNSearch, pointNKNSquaredDistance) > 0) {
+                // 找到了最近点，只取它的高度！
+                pcl::PointXYZ nearest_pt = cloud->points[pointIdxNKNSearch[0]];
+                if (axis_h == 0) pos(axis_h) = nearest_pt.x;
+                else if (axis_h == 1) pos(axis_h) = nearest_pt.y;
+                else pos(axis_h) = nearest_pt.z;
+            } else {
+                // 找不到就用平均值
+                pos(axis_h) = h_query;
+            }
             controlPs[i * num_v + j] = pos;
         }
     }
+}
+bool BSplineSurface::isPointValid(const Vector3d& p) {
+    if (p.x()<(min_x-0.05) || p.x()>(max_x+0.05) || p.y()<(min_y-0.05) || p.y()>(max_y+0.05) || p.z()<(min_z-0.1) || p.z()>(max_z+0.1))
+        return false;
+    return true;
 }
 
 void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v) {
@@ -348,10 +378,10 @@ void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u,
     controls_num_v = num_v;
 
     int start_u = 3;
-    int end_u   = controls_num_u - 4;
+    int end_u   = controls_num_u ;
 
     int start_v = 3;
-    int end_v   = controls_num_v - 4;
+    int end_v   = controls_num_v ;
     for (int i = start_u; i <= end_u; ++i) {
         double dt_u = knots_u[i + 1] - knots_u[i];
         if (dt_u <= 1e-6) continue;
@@ -368,9 +398,12 @@ void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u,
                     Parameter paraV(j, global_v);
 
                     Vector3d p = getPos(paraU, paraV, knots_u, knots_v, controls, controls_num_v);
+                    if (isPointValid(p))
+                        {
+                            positions.push_back(p);
+                            sampling_paras_.push_back(std::make_pair(paraU, paraV));
+                        }
 
-                    positions.push_back(p);
-                    sampling_paras_.push_back(std::make_pair(paraU, paraV));
                 }
             }
         }
@@ -470,7 +503,8 @@ double BSplineSurface::apply(
         double eplison )
 {
 
-
+    this->input_cloud_ = points;
+    this->input_kdtree_.setInputCloud(points);
     vector<Vector3d> controlPs;
     controlPs.resize(controls_num_u * controls_num_v);
 
@@ -493,7 +527,7 @@ double BSplineSurface::apply(
         vector<pair<Parameter, Parameter>> parameters;
         double current_sq_dist = findFootPrint(givepoints, parameters);
         std::cout<<last_error<<" "<<current_sq_dist<<endl;
-        if (std::abs((last_error - current_sq_dist) < eplison && current_sq_dist <=20) || current_sq_dist <=110) {
+        if (std::abs((last_error - current_sq_dist) < eplison && current_sq_dist <=2) || current_sq_dist <=0.5) {
             std::cout << "Converged at iter " << iter << std::endl;
             break;
         }
@@ -541,7 +575,7 @@ double BSplineSurface::apply(
             // 遍历每一行，对中间的点加约束
 
         }
-        double smooth_weight = 0.09;
+        double smooth_weight = 0.03;
         for (int i = 0; i < controls_num_u; ++i) {
             for (int j = 1; j < controls_num_v - 1; ++j) {
                 // 获取连续三个点的索引
@@ -577,6 +611,8 @@ double BSplineSurface::apply(
                 );
             }
         }
+
+
 
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;

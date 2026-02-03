@@ -5,6 +5,8 @@
 #include <vector>
 #include <pcl/common/common.h>
 #include <pcl/point_types.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/common/centroid.h>
 #include <map>
 
 
@@ -200,7 +202,7 @@ public:
     void pclToEigenVector(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, std::vector<Vector3d>& out_vec);
     double apply(pcl::PointCloud<pcl::PointXYZ>::Ptr& points,int maxIterNum,double alpha,double gama,double eplison);
     const vector<Vector3d>& getControls() const{return controls;}
-
+    bool isPointValid(const Vector3d& p);
     const vector<Vector3d>& getSamples() const{return positions;}
 private:
 
@@ -230,6 +232,9 @@ private:
     int controls_num_u;
     int controls_num_v;
     double interal_;
-
+    double max_x,max_y,max_z;
+    double min_x,min_y,min_z;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud_;
+    pcl::KdTreeFLANN<pcl::PointXYZ> input_kdtree_;
     vector<pair<Parameter, Parameter>> sampling_paras_;
 };

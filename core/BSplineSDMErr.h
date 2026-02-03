@@ -145,4 +145,6 @@ struct BSplineFirstOrderErr {
 
     double weight_;
 };
+
+
 #endif //SPLINE_FITTING_BSPLINESDMERR_H
