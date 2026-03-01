@@ -7,6 +7,7 @@
 #include <pcl/point_types.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/common/centroid.h>
+#include <tool.h>
 #include <map>
 
 
@@ -148,7 +149,13 @@ struct CurvatureCenters {
 class BSplineSurface {
 public:
     typedef std::pair<int, double> Parameter;
-    BSplineSurface(int deg_u,int deg_v,int control_num_u,int control_num_v,double interal=0.001):
+    struct LocalRange {
+        double min_x, max_x;
+        double min_y, max_y;
+        double min_z, max_z;
+        bool has_data = false;
+    };
+    BSplineSurface(int deg_u,int deg_v,int control_num_u,int control_num_v,double interal=0.01):
         interal_u(interal),interal_v(interal),Deg_u(deg_u),Deg_v(deg_v),controls_num_u(control_num_u),controls_num_v(control_num_v)
     {
         knots_u.resize(deg_u+control_num_u+1);
@@ -196,7 +203,7 @@ public:
     Vector3d getCurvCenter(const Parameter& para, const vector<double> &knots,const std::vector<Vector3d> &controls);
     double findFootPrint(const vector<Vector3d>& givepoints,vector<pair<Parameter, Parameter>>& footPrints);
     void initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,vector<Vector3d>& controlPs,int num_u,int num_v);
-    void setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v);
+    void setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v,bool isCut = false);
     void setKnotParams(int num_cp_u,int num_cp_v);
     pair<Parameter, Parameter> getPara(int index);
     void pclToEigenVector(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, std::vector<Vector3d>& out_vec);
@@ -204,6 +211,7 @@ public:
     const vector<Vector3d>& getControls() const{return controls;}
     bool isPointValid(const Vector3d& p);
     const vector<Vector3d>& getSamples() const{return positions;}
+    void buildRangeGrid(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int grid_res);
 private:
 
     void clear(){
@@ -237,4 +245,14 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud_;
     pcl::KdTreeFLANN<pcl::PointXYZ> input_kdtree_;
     vector<pair<Parameter, Parameter>> sampling_paras_;
+    std::vector<std::vector<LocalRange>> range_grid_;
+    int grid_res_x_ = 0;
+    int grid_res_y_ = 0;
+    double grid_cell_size_x_ = 0;
+    double grid_cell_size_y_ = 0;
+    double grid_origin_x_ = 0;
+    double grid_origin_y_ = 0;
+    int cn1 = 0;
+    int cn2 = 0;
+    int cn3 = 0;
 };

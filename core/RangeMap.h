@@ -6,15 +6,16 @@
 #define SPLINE_FITTING_RANGEMAP_H
 
 #include <iostream>
+#include <fstream>
 #include <vector>
-#include <cmath>
-#include <limits>
-#include <algorithm>
-
-// PCL Headers
+#include <string>
+#include <sys/stat.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 #include <pcl/common/common.h>
+#include <opencv4/opencv2/opencv.hpp>
+#include <Eigen/Eigenvalues>
+
 
 // OpenMP 用于加速
 #include <omp.h>
@@ -25,6 +26,13 @@ struct RangePixel {
     double z = 0.0;
     double range = 0.0;
     bool valid = false;
+    std::pair<double, double> curvature;
+    bool is_visted = false;
+};
+
+struct SegmentationResult {
+    std::vector<int> label_map;             // 全图标签
+    std::vector<std::vector<int>> clusters; // 每个面的索引集合
 };
 
 class RangeImageProcessor {
@@ -33,34 +41,43 @@ public:
     const int W_COLS = 1800;
     const float FOV_UP = 2.0f;
     const float FOV_DOWN = -24.8f;
-
+    double alpha_vert_rad_;
+    double alpha_horiz_rad_;
     std::vector<RangePixel> range_image_;
-
+    pcl::PointCloud<pcl::PointXYZ> ouyt;
     RangeImageProcessor() {
         range_image_.resize(H_SCANS * W_COLS);
-    }
+        alpha_vert_rad_ = (FOV_UP * M_PI / 180.0f - FOV_DOWN * M_PI / 180.0f)/(H_SCANS - 1);
+        alpha_horiz_rad_ = (2.0 * M_PI) / W_COLS;
 
+    }
+    void saveRangeImageBin(const std::string& filename);
     // -----------------------------------------------------------------
     // 2. 核心函数: PointCloud -> RangeImage
     // -----------------------------------------------------------------
     void generateRangeImage(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
-    bool getPoint(int u, int v, Eigen::Vector3d& out_point) {
+    bool getPoint(int u, int v, Eigen::Vector3d& out_point) const {
         // 处理 V 方向 (水平) 的周期性
-        if (v < 0) v += W_COLS;
-        if (v >= W_COLS) v -= W_COLS;
+        v = v % W_COLS;
+        v += (v < 0) * W_COLS;
 
-        // U 方向越界则无效
-        if (u < 0 || u >= H_SCANS) return false;
+        bool u_valid = (unsigned)u < (unsigned)H_SCANS;
 
         int idx = u * W_COLS + v;
         const auto& px = range_image_[idx];
-
-        if (px.valid) {
-            out_point << px.x, px.y, px.z;
-            return true;
-        }
-        return false;
+        out_point << px.x, px.y, px.z;
+        return u_valid & px.valid;
     }
+    int wrapCol(int v) const {
+        int nv = (v + W_COLS) % W_COLS;
+        return nv;
+    }
+
+    bool computePixelCurvature(int u, int v, std::pair<double, double>& curvature);
+    SegmentationResult segmentRangeImage(double theta_deg, double max_h_curvature, double max_v_curvature, double max_dist, int min_cluster_size);
+    void saveClustersToTxt(const SegmentationResult& result, const std::string& folder_path);
+    bool findValidNeighborPt(int u, int v, const Eigen::Vector3d& center_pt, Eigen::Vector3d& neighbor_pt, bool is_vertical = false, int dir = 1) const;
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> generateClusterClouds(const SegmentationResult& result);
 };
 
 

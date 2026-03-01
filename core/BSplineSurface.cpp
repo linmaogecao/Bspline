@@ -230,6 +230,56 @@ SurfaceCurvature BSplineSurface::getCurvature(const Parameter& paraU, const Para
     return result;
 }
 
+void BSplineSurface::buildRangeGrid(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, int grid_res) {
+    if (!cloud || cloud->empty()) return;
+
+    // Use global bounds (already computed in initControlPoint)
+    grid_origin_x_ = min_x;
+    grid_origin_y_ = min_y;
+
+    double range_x = max_x - min_x;
+    double range_y = max_y - min_y;
+
+    // Determine grid resolution based on data range
+    grid_res_x_ = grid_res;
+    grid_res_y_ = grid_res;
+    grid_cell_size_x_ = range_x / grid_res_x_;
+    grid_cell_size_y_ = range_y / grid_res_y_;
+
+    // Avoid division by zero
+    if (grid_cell_size_x_ < 1e-9) grid_cell_size_x_ = 1.0;
+    if (grid_cell_size_y_ < 1e-9) grid_cell_size_y_ = 1.0;
+
+    // Initialize grid
+    range_grid_.clear();
+    range_grid_.resize(grid_res_x_, std::vector<LocalRange>(grid_res_y_));
+
+    // Fill grid with point data
+    for (const auto& pt : cloud->points) {
+        int ix = static_cast<int>((pt.x - grid_origin_x_) / grid_cell_size_x_);
+        int iy = static_cast<int>((pt.y - grid_origin_y_) / grid_cell_size_y_);
+
+        // Clamp to valid range
+        ix = std::max(0, std::min(ix, grid_res_x_ - 1));
+        iy = std::max(0, std::min(iy, grid_res_y_ - 1));
+
+        LocalRange& cell = range_grid_[ix][iy];
+        if (!cell.has_data) {
+            cell.min_x = cell.max_x = pt.x;
+            cell.min_y = cell.max_y = pt.y;
+            cell.min_z = cell.max_z = pt.z;
+            cell.has_data = true;
+        } else {
+            cell.min_x = std::min(cell.min_x, (double)pt.x);
+            cell.max_x = std::max(cell.max_x, (double)pt.x);
+            cell.min_y = std::min(cell.min_y, (double)pt.y);
+            cell.max_y = std::max(cell.max_y, (double)pt.y);
+            cell.min_z = std::min(cell.min_z, (double)pt.z);
+            cell.max_z = std::max(cell.max_z, (double)pt.z);
+        }
+    }
+}
+
 double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<pair<Parameter, Parameter>> &footPrints) {
     footPrints.clear();
     footPrints.resize( givepoints.size());
@@ -266,7 +316,7 @@ double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<
                 nnIdx, // nearest neighbors (returned)
                 dists, // distance (returned)
                 eps); // error bound
-        squareSum += dists[0];
+        squareSum += std::sqrt(dists[0]);
 
         footPrints[i] =  getPara(nnIdx[0]) ;
     }
@@ -283,7 +333,6 @@ double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<
 
 std::pair<BSplineSurface::Parameter, BSplineSurface::Parameter> BSplineSurface:: getPara(int index) {
     if (index < 0 || index >= sampling_paras_.size()) {
-        std::cout<<"nnIdx[0]"<<index<<sampling_paras_.size()<<endl;
         return {Parameter(0, 0.0), Parameter(0, 0.0)};
     }
     return sampling_paras_[index];
@@ -327,9 +376,9 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
     // else {
     //     axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
     // }
-    axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
-    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-    kdtree.setInputCloud(cloud);
+    axis_h = 0; axis_u = 1; axis_v = 2; // u=x, v=y
+
+    input_kdtree_.setInputCloud(cloud);
 
     double u_step = range[axis_u] / (num_u - 1);
     double v_step = range[axis_v] / (num_v - 1);
@@ -351,7 +400,7 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
             else searchPoint.z = h_query;
             std::vector<int> pointIdxNKNSearch(1);
             std::vector<float> pointNKNSquaredDistance(1);
-            if (kdtree.nearestKSearch(searchPoint, 1, pointIdxNKNSearch, pointNKNSquaredDistance) > 0) {
+            if (input_kdtree_.nearestKSearch(searchPoint, 1, pointIdxNKNSearch, pointNKNSquaredDistance) > 0) {
                 // 找到了最近点，只取它的高度！
                 pcl::PointXYZ nearest_pt = cloud->points[pointIdxNKNSearch[0]];
                 if (axis_h == 0) pos(axis_h) = nearest_pt.x;
@@ -366,12 +415,73 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
     }
 }
 bool BSplineSurface::isPointValid(const Vector3d& p) {
-    if (p.x()<(min_x-0.05) || p.x()>(max_x+0.05) || p.y()<(min_y-0.05) || p.y()>(max_y+0.05) || p.z()<(min_z-0.1) || p.z()>(max_z+0.1))
+    double global_margin = 0.06;
+    if (p.x() < (min_x - global_margin) || p.x() > (max_x + global_margin) ||
+        p.y() < (min_y - global_margin) || p.y() > (max_y + global_margin) ||
+        p.z() < (min_z - global_margin) || p.z() > (max_z + global_margin)) {
+        cn1++;
         return false;
+        }
+    if (range_grid_.empty()) {
+        return true;
+    }
+
+    // Find grid cell for this point
+    int ix = static_cast<int>((p.x() - grid_origin_x_) / grid_cell_size_x_);
+    int iy = static_cast<int>((p.y() - grid_origin_y_) / grid_cell_size_y_);
+
+    // Clamp to valid range
+    ix = std::max(0, std::min(ix, grid_res_x_ - 1));
+    iy = std::max(0, std::min(iy, grid_res_y_ - 1));
+
+    // Check current cell and neighboring cells (3x3 neighborhood)
+    double local_min_x = std::numeric_limits<double>::max();
+    double local_max_x = std::numeric_limits<double>::lowest();
+    double local_min_y = std::numeric_limits<double>::max();
+    double local_max_y = std::numeric_limits<double>::lowest();
+    double local_min_z = std::numeric_limits<double>::max();
+    double local_max_z = std::numeric_limits<double>::lowest();
+    bool found_data = false;
+
+    for (int di = -1; di <= 1; ++di) {
+        for (int dj = -1; dj <= 1; ++dj) {
+            int ni = ix + di;
+            int nj = iy + dj;
+            if (ni >= 0 && ni < grid_res_x_ && nj >= 0 && nj < grid_res_y_) {
+                const LocalRange& cell = range_grid_[ni][nj];
+                if (cell.has_data) {
+                    found_data = true;
+                    local_min_x = std::min(local_min_x, cell.min_x);
+                    local_max_x = std::max(local_max_x, cell.max_x);
+                    local_min_y = std::min(local_min_y, cell.min_y);
+                    local_max_y = std::max(local_max_y, cell.max_y);
+                    local_min_z = std::min(local_min_z, cell.min_z);
+                    local_max_z = std::max(local_max_z, cell.max_z);
+                }
+            }
+        }
+    }
+
+    // If no data in neighborhood, reject the point (it's in an empty region)
+    if (!found_data) {
+        cn2++;
+        return false;
+    }
+
+    // Check if point is within local range + margin
+    double local_margin = 0.03;
+    if (p.x() < (local_min_x - local_margin) || p.x() > (local_max_x + local_margin) ||
+        p.y() < (local_min_y - local_margin) || p.y() > (local_max_y + local_margin) ||
+        p.z() < (local_min_z - local_margin) || p.z() > (local_max_z + local_margin)) {
+        cn3++;
+        return false;
+    }
+
+
     return true;
 }
 
-void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v) {
+void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v,bool isCut) {
     clear();
     controls = controlPs;
     controls_num_u = num_u;
@@ -379,7 +489,7 @@ void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u,
 
     int start_u = 3;
     int end_u   = controls_num_u ;
-
+    int valid_cnt  = 0;
     int start_v = 3;
     int end_v   = controls_num_v ;
     for (int i = start_u; i <= end_u; ++i) {
@@ -400,15 +510,21 @@ void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u,
                     Vector3d p = getPos(paraU, paraV, knots_u, knots_v, controls, controls_num_v);
                     if (isPointValid(p))
                         {
-                            positions.push_back(p);
-                            sampling_paras_.push_back(std::make_pair(paraU, paraV));
+                        valid_cnt++;
+                        positions.push_back(p);
+                        sampling_paras_.push_back(std::make_pair(paraU, paraV));
                         }
+                    else if (isCut) {
+                        positions.push_back(p);
+                        sampling_paras_.push_back(std::make_pair(paraU, paraV));
+                    }
 
                 }
             }
         }
     }
-
+    std::cout<<"cn1 "<<cn1<<" cn2 "<<cn2<<" cn3 "<<cn3<<std::endl;
+    std::cout<<"positions size:"<<positions.size()<<" :"<<valid_cnt<<std::endl;
 }
 
 void BSplineSurface::setKnotParams(int num_cp_u,int num_cp_v) {
@@ -504,11 +620,13 @@ double BSplineSurface::apply(
 {
 
     this->input_cloud_ = points;
+    //std::cout<<"point size<<"<<points->size()<<std::endl;
     this->input_kdtree_.setInputCloud(points);
     vector<Vector3d> controlPs;
     controlPs.resize(controls_num_u * controls_num_v);
 
     initControlPoint(points, controlPs,controls_num_u, controls_num_v);
+    buildRangeGrid(points, 50);
     setNewControl(controlPs,controls_num_u,controls_num_v);
     setKnotParams(controls_num_u, controls_num_v);
     // update the control point
@@ -522,15 +640,39 @@ double BSplineSurface::apply(
     double last_error = 1e9;
     vector<Vector3d> givepoints;
     pclToEigenVector(points, givepoints);
+    int point_num = givepoints.size();
     for(int iter = 0; iter < maxIterNum; ++iter) {
         ceres::Problem problem;
         vector<pair<Parameter, Parameter>> parameters;
         double current_sq_dist = findFootPrint(givepoints, parameters);
-        std::cout<<last_error<<" "<<current_sq_dist<<endl;
-        if (std::abs((last_error - current_sq_dist) < eplison && current_sq_dist <=2) || current_sq_dist <=0.5) {
-            std::cout << "Converged at iter " << iter << std::endl;
+        double diff = last_error - current_sq_dist;
+        double relative_decrease = std::abs(diff) / (last_error + 1e-10); // 防止除0
+        double rmse = (current_sq_dist / point_num); // 均方根误差(平均距离)
+
+        // 打印详细调试信息，方便观察收敛情况
+        std::cout << "Iter: " << iter
+                  << " | Total Err: " << current_sq_dist
+                  << " | RMSE: " << rmse
+                  << " | Rel Decr: " << relative_decrease * 100.0 << "%" << std::endl;
+
+        // --- 新的终止策略 ---
+
+        // 策略1: 相对下降率极小 (收敛平台期)
+        // 例如：如果你传入的 eplison 是 1e-3 (0.1%)，当提升小于这个比例时停止
+        // iter > 0 是为了防止第一次 last_error 为初始值时的误判
+        if (iter > 0 && relative_decrease < eplison) {
+            std::cout << ">> Converged by Relative Decrease (" << relative_decrease << " < " << eplison << ")" << std::endl;
             break;
         }
+
+        // 策略2: 绝对精度满足要求 (RMSE)
+        // 这里的 1e-3 代表平均误差小于 0.001 (假设单位是米，即1mm)
+        // 你可以根据你的点云尺度调整这个值
+        if (rmse < 1e-2) {
+            std::cout << ">> Converged by RMSE (" << rmse << " < 1e-3)" << std::endl;
+            break;
+        }
+
         last_error = current_sq_dist;
         for( int i = 0; i< parameters.size(); i++)
         {
