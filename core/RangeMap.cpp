@@ -4,6 +4,12 @@
 
 #include "RangeMap.h"
 
+struct QueueItem {
+    int index;
+    Eigen::Vector3d accumulated_direction;  // Smoothed direction over last few steps
+    int step_count;
+};
+
 void RangeImageProcessor::generateRangeImage(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud)
 {
     std::fill(range_image_.begin(), range_image_.end(), RangePixel());
@@ -16,7 +22,6 @@ void RangeImageProcessor::generateRangeImage(const pcl::PointCloud<pcl::PointXYZ
     //#pragma omp parallel for schedule(static)
     for (size_t i = 0; i < cloud->size(); ++i) {
         const auto& pt = cloud->points[i];
-
         if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
             continue;
         double range = std::sqrt(pt.x * pt.x + pt.y * pt.y + pt.z * pt.z);
@@ -174,22 +179,20 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
     int pixel_num = H_SCANS * W_COLS;
     result.label_map.assign(pixel_num, 0);
 
-    // 1. 初始化 Valid 和 Curvature
-    // 默认曲率设为0或180其实不重要，因为我们只查 Valid 点的曲率
-    std::vector<std::pair<double, double>> pixel_curvate(pixel_num, {0.0, 0.0});
+    // 1. 初始化 Valid
     std::vector<bool> pixel_valid(pixel_num, false);
     double theta_rad = theta_deg * M_PI / 180.0;
-
+    int test_cnt = 0;
     for (int i = 0; i < H_SCANS; ++i) {
         for (int j = 0; j < W_COLS; ++j) {
             int idx = i * W_COLS + j;
             if (range_image_[idx].valid) {
                 pixel_valid[idx] = true;
-                computePixelCurvature(i, j, pixel_curvate[idx]);
+                test_cnt++;
             }
         }
     }
-
+    std::cout<<"test_cnt: "<<test_cnt<<std::endl;
     int current_label = 0;
     int dir_u[8] = {-1, 1, 0, 0, -1, -1, 1, 1};
     int dir_v[8] = {0, 0, -1, 1, -1, 1, -1, 1};
@@ -214,9 +217,10 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
         result.label_map[index] = current_label;
         current_cluster.push_back(index);
         q.push_back(index);
-
+        int last_neighour_idx = -1;
         while (!q.empty()) {
             int cur_index = q.front(); q.pop_front();
+            
             int u = cur_index / W_COLS;
             int v = cur_index % W_COLS;
             double crange = range_image_[cur_index].range;
@@ -264,7 +268,7 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                 double dz = range_image_[cur_index].z - range_image_[found_neighbor_idx].z;
                 double min_euclidean_dist = std::sqrt(dx*dx + dy*dy + dz*dz);
                 if (min_euclidean_dist > adaptive_max_dist) {
-                    if (range_image_[found_neighbor_idx].y > -9 && range_image_[found_neighbor_idx].y < -5 && range_image_[found_neighbor_idx].x >22 && range_image_[found_neighbor_idx].x <27 ) {
+                    if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >22 && range_image_[found_neighbor_idx].x <22.2 ) {
                         std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
                         std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
                         std::cout << "REJECTD by Euclidean Dist: " << min_euclidean_dist << " > " << adaptive_max_dist << std::endl;
@@ -273,12 +277,29 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                     }
                     continue;
                 }
-                // if (min_euclidean_dist < adaptive_max_dist) {
-                //     if (range_image_[cur_index].y > -8 && range_image_[cur_index].y < -5 && range_image_[cur_index].x >15.8 && range_image_[cur_index].x <17.3) {
-                //         std::cout << "  [接受] by Euclidean Dist: " << min_euclidean_dist << " < " << adaptive_max_dist << "\n";
-                //     }
-                //     accepted = true;
-                // }
+
+                if (last_neighour_idx > 0) {
+                    double dx_last = range_image_[last_neighour_idx].x - range_image_[found_neighbor_idx].x;
+                    double dy_last = range_image_[last_neighour_idx].y - range_image_[found_neighbor_idx].y;
+                    double dz_last = range_image_[last_neighour_idx].z - range_image_[found_neighbor_idx].z;
+
+                    double min_euclidean_dist_last = std::sqrt(dx_last*dx_last + dy_last*dy_last + dz_last*dz_last);
+                    if (min_euclidean_dist_last > 1.3 * adaptive_max_dist) {
+                        continue;
+                    }
+                    if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >21.6 && range_image_[found_neighbor_idx].x <22.2) {
+                        std::cout << "range_image_[last _neighou_idx]" << range_image_[last_neighour_idx].x << " " << range_image_[last_neighour_idx].y << " " << range_image_[last_neighour_idx].z << std::endl;
+                        std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
+                        std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
+                        std::cout << "ACC by min_euclidean_dist_last Dist: " << min_euclidean_dist_last << " < " << 1.3 * adaptive_max_dist << std::endl;
+                        std::cout<< "u "<<(cur_index / W_COLS) << "v "<<(cur_index % W_COLS) << std::endl;
+                        std::cout<< "n_u "<<(found_neighbor_idx / W_COLS) << "n_v "<<(found_neighbor_idx % W_COLS) << std::endl;
+                        std::cout <<"last_u "<<(last_neighour_idx / W_COLS) << "last_v "<<(last_neighour_idx % W_COLS) << std::endl;
+                        std::cout << "clust" << cluster_cnt << std::endl;
+                    }
+                }
+                last_neighour_idx = cur_index;
+
                 double d1 = std::max(crange, nrange);
                 double d2 = std::min(crange, nrange);
                 double alpha_rad_base = (k < 2) ? alpha_vert_rad_ : alpha_horiz_rad_;
@@ -289,10 +310,13 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                     double belta = std::atan2(d2 * std::sin(alpha_rad), denom);
                     theta_rad = k<2 ? 30* M_PI / 180.0 : 2.5 * M_PI / 180.0;
                     if (belta > theta_rad) {
-                        if (range_image_[found_neighbor_idx].y > -9 && range_image_[found_neighbor_idx].y < -6 && range_image_[found_neighbor_idx].x >22 && range_image_[found_neighbor_idx].x <27) {
+                        if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >21.6 && range_image_[found_neighbor_idx].x <22.2) {
                             std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
                             std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
+                            std::cout << "ACC by Euclidean Dist: " << min_euclidean_dist << " < " << adaptive_max_dist << std::endl;
                             std::cout << "ACC by theta_rad : " << belta << " > " << theta_rad << std::endl;
+                            std::cout<< "u "<<(cur_index / W_COLS) << "v "<<(cur_index % W_COLS) << std::endl;
+                            std::cout<< "n_u "<<(found_neighbor_idx / W_COLS) << "n_v "<<(found_neighbor_idx % W_COLS) << std::endl;
                             std::cout << "clust" << cluster_cnt << std::endl;
                         }
                         result.label_map[found_neighbor_idx] = current_label;
@@ -300,7 +324,7 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                         q.push_back(found_neighbor_idx);
                     }
                     else {
-                        if (range_image_[found_neighbor_idx].y > 10 && range_image_[found_neighbor_idx].y < 15 && range_image_[found_neighbor_idx].x >-5 && range_image_[found_neighbor_idx].x <2) {
+                        if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >21.6 && range_image_[found_neighbor_idx].x <22.2) {
                             std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
                             std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
                             std::cout << "ACC by theta_rad : " << belta << " > " << theta_rad << std::endl;
@@ -310,34 +334,7 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                         }
                     }
                 }
-               // if (pixel_curvate[found_neighbor_idx].first > max_h_curvature) {
-               //      // if (range_image_[found_neighbor_idx].y > -10 && range_image_[found_neighbor_idx].y < -6 && range_image_[found_neighbor_idx].x >-2.5 && range_image_[found_neighbor_idx].x <7.5) {
-               //      //     std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
-               //      //     std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
-               //      //     std::cout << "accept by curvarate : " << pixel_curvate[found_neighbor_idx].first << " > " << max_h_curvature << std::endl;
-               //      //     std::cout << "clust" << cluster_cnt << std::endl;
-               //      // }
-               //     result.label_map[found_neighbor_idx] = current_label;
-               //     current_cluster.push_back(found_neighbor_idx);
-               //     q.push_back(found_neighbor_idx);
-               //  }
-               //  else if (pixel_curvate[found_neighbor_idx].first < 0 ) {
-               //
-               //  }
             }
-
-
-
-
-
-            // if (range_image_[cur_index].y > -12 && range_image_[cur_index].y < -5 && range_image_[cur_index].x >5 && range_image_[cur_index].x <15) {
-            //     std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
-            //     std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
-            //     std::cout << "REJECTED by curvarate : " << pixel_curvate[found_neighbor_idx].first << " > " << max_h_curvature << std::endl;
-            //     std::cout << "REJECTED by Euclidean Dist: " << min_euclidean_dist << " < " << adaptive_max_dist << std::endl;
-            //     std::cout << "REJECTED by theta_rad : " << belta << " > " << theta_rad << std::endl;
-            //     std::cout<<"look "<<max_dist<<" "<<avg_range<<" "<<found_step<<std::endl;
-            // }
         }
 
         if (current_cluster.size() > min_cluster_size) {

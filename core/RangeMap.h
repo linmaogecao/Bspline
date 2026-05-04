@@ -35,10 +35,31 @@ struct SegmentationResult {
     std::vector<std::vector<int>> clusters; // 每个面的索引集合
 };
 
+struct VoxelGrid {
+    double resolution;  // 体素大小，如 0.5m
+    std::unordered_map<std::string, std::vector<int>> voxel_map;  // key: "x_y_z", value: 点索引列表
+
+    VoxelGrid(double res = 0.5) : resolution(res) {}
+
+    std::string getKey(double x, double y, double z) const {
+        int vx = static_cast<int>(std::floor(x / resolution));
+        int vy = static_cast<int>(std::floor(y / resolution));
+        int vz = static_cast<int>(std::floor(z / resolution));
+        return std::to_string(vx) + "_" + std::to_string(vy) + "_" + std::to_string(vz);
+    }
+
+    void addPoint(const RangePixel& px, int index) {
+        if (!px.valid) return;
+        std::string key = getKey(px.x, px.y, px.z);
+        voxel_map[key].push_back(index);
+    }
+};
+
+
 class RangeImageProcessor {
 public:
     const int H_SCANS = 64;
-    const int W_COLS = 1800;
+    const int W_COLS = 1500;
     const float FOV_UP = 2.0f;
     const float FOV_DOWN = -24.8f;
     double alpha_vert_rad_;

@@ -146,5 +146,27 @@ struct BSplineFirstOrderErr {
     double weight_;
 };
 
+struct BoundaryPenalty {
+    BoundaryPenalty(const Vector3d& min_p, const Vector3d& max_p, double w)
+        : min_p_(min_p), max_p_(max_p), w_(w) {}
+
+    template <typename T>
+    bool operator()(const T* const cp, T* residual) const {
+        for (int k = 0; k < 3; ++k) {
+            T v = cp[k];
+            T minv = T(min_p_[k]);
+            T maxv = T(max_p_[k]);
+            T r = T(0);
+            if (v < minv) r = minv - v;
+            else if (v > maxv) r = v - maxv;
+            residual[k] = T(w_) * r;
+        }
+        return true;
+    }
+
+    Vector3d min_p_, max_p_;
+    double w_;
+};
+
 
 #endif //SPLINE_FITTING_BSPLINESDMERR_H

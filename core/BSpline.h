@@ -201,7 +201,7 @@ public:
     Vector3d getTangent(const Parameter& para, const vector<double> &knots,const std::vector<Vector3d> &controls);
     Vector3d getNormal(const Parameter& para, const vector<double> &knots,const std::vector<Vector3d> &controls);
     Vector3d getCurvCenter(const Parameter& para, const vector<double> &knots,const std::vector<Vector3d> &controls);
-    double findFootPrint(const vector<Vector3d>& givepoints,vector<pair<Parameter, Parameter>>& footPrints);
+    double findFootPrint(const vector<Vector3d>& givepoints,vector<pair<Parameter, Parameter>>& footPrints, vector<double> &point_dists);
     void initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,vector<Vector3d>& controlPs,int num_u,int num_v);
     void setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v,bool isCut = false);
     void setKnotParams(int num_cp_u,int num_cp_v);

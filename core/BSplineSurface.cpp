@@ -280,10 +280,11 @@ void BSplineSurface::buildRangeGrid(const pcl::PointCloud<pcl::PointXYZ>::Ptr& c
     }
 }
 
-double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<pair<Parameter, Parameter>> &footPrints) {
+double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<pair<Parameter, Parameter>> &footPrints, vector<double> &point_dists) {
     footPrints.clear();
     footPrints.resize( givepoints.size());
-
+    point_dists.clear();
+    point_dists.resize(givepoints.size());
     int iKNei = 1;
     int iDim = 3;
     size_t iNPts = positions.size();
@@ -317,7 +318,7 @@ double BSplineSurface::findFootPrint(const vector<Vector3d> &givepoints, vector<
                 dists, // distance (returned)
                 eps); // error bound
         squareSum += std::sqrt(dists[0]);
-
+        point_dists[i] = dists[0];
         footPrints[i] =  getPara(nnIdx[0]) ;
     }
 
@@ -415,7 +416,7 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
     }
 }
 bool BSplineSurface::isPointValid(const Vector3d& p) {
-    double global_margin = 0.06;
+    double global_margin = 0.03;
     if (p.x() < (min_x - global_margin) || p.x() > (max_x + global_margin) ||
         p.y() < (min_y - global_margin) || p.y() > (max_y + global_margin) ||
         p.z() < (min_z - global_margin) || p.z() > (max_z + global_margin)) {
@@ -469,7 +470,7 @@ bool BSplineSurface::isPointValid(const Vector3d& p) {
     }
 
     // Check if point is within local range + margin
-    double local_margin = 0.03;
+    double local_margin = 0.02;
     if (p.x() < (local_min_x - local_margin) || p.x() > (local_max_x + local_margin) ||
         p.y() < (local_min_y - local_margin) || p.y() > (local_max_y + local_margin) ||
         p.z() < (local_min_z - local_margin) || p.z() > (local_max_z + local_margin)) {
@@ -640,11 +641,13 @@ double BSplineSurface::apply(
     double last_error = 1e9;
     vector<Vector3d> givepoints;
     pclToEigenVector(points, givepoints);
-    int point_num = givepoints.size();
+    int point_num = givepoints.size();bool stop_flag = false;
+
     for(int iter = 0; iter < maxIterNum; ++iter) {
         ceres::Problem problem;
         vector<pair<Parameter, Parameter>> parameters;
-        double current_sq_dist = findFootPrint(givepoints, parameters);
+        vector<double> point_dists;
+        double current_sq_dist = findFootPrint(givepoints, parameters,point_dists);
         double diff = last_error - current_sq_dist;
         double relative_decrease = std::abs(diff) / (last_error + 1e-10); // 防止除0
         double rmse = (current_sq_dist / point_num); // 均方根误差(平均距离)
@@ -662,7 +665,16 @@ double BSplineSurface::apply(
         // iter > 0 是为了防止第一次 last_error 为初始值时的误判
         if (iter > 0 && relative_decrease < eplison) {
             std::cout << ">> Converged by Relative Decrease (" << relative_decrease << " < " << eplison << ")" << std::endl;
-            break;
+            vector<Vector3d> controls_copy = controls; // <--- ✅ 先克隆一份
+
+            if (!stop_flag) {
+                stop_flag = true;
+                std::cout<<"ready to stop "<<std::endl;
+            }
+            else {
+                setNewControl(controls_copy, controls_num_u, controls_num_v,true);
+                break;
+            }
         }
 
         // 策略2: 绝对精度满足要求 (RMSE)
@@ -670,12 +682,37 @@ double BSplineSurface::apply(
         // 你可以根据你的点云尺度调整这个值
         if (rmse < 1e-2) {
             std::cout << ">> Converged by RMSE (" << rmse << " < 1e-3)" << std::endl;
-            break;
+            vector<Vector3d> controls_copy = controls; // <--- ✅ 先克隆一份
+            if (!stop_flag) {
+                stop_flag = true;
+                setNewControl(controls_copy, controls_num_u, controls_num_v,true);
+            }
+            else {
+                setNewControl(controls_copy, controls_num_u, controls_num_v,true);
+                break;
+            }
         }
 
         last_error = current_sq_dist;
+        auto computeMAD = [](const vector<double>& v){
+            vector<double> tmp = v;
+            std::nth_element(tmp.begin(), tmp.begin() + tmp.size()/2, tmp.end());
+            double med = tmp[tmp.size()/2];
+            for (auto& x : tmp) x = std::abs(x - med);
+            std::nth_element(tmp.begin(), tmp.begin() + tmp.size()/2, tmp.end());
+            double mad = tmp[tmp.size()/2];
+            return std::make_pair(med, mad);
+        };
+
+        auto [med, mad] = computeMAD(point_dists);
+        double sigma = 1.4826 * mad + 1e-6;
+        double inlier_thresh = med + 2.5 * sigma;
+
         for( int i = 0; i< parameters.size(); i++)
         {
+            if (point_dists[i] > inlier_thresh) {
+                continue; // 直接当噪声，跳过
+            }
             Parameter paraU = parameters[i].first, paraV = parameters[i].second;
             SurfaceCurvature surf_info = getCurvature(paraU, paraV, knots_u, knots_v, controls, controls_num_v);
 
@@ -711,8 +748,8 @@ double BSplineSurface::apply(
                 }
             }
             ceres::CostFunction* cost_func = new BSplineSDMErr(givepoints[i], surf_info, active_weights);
-
-            problem.AddResidualBlock(cost_func, nullptr, active_cp_pointers);
+            ceres::LossFunction* loss = new ceres::HuberLoss(0.05);
+            problem.AddResidualBlock(cost_func, loss, active_cp_pointers);
             // 1. U 方向平滑 (行约束)
             // 遍历每一行，对中间的点加约束
 
@@ -755,6 +792,15 @@ double BSplineSurface::apply(
         }
 
 
+        Vector3d min_p(min_x, min_y, min_z);
+        Vector3d max_p(max_x, max_y, max_z);
+        double bound_w = 10.0; // 可调
+        for (int i = 0; i < controls.size(); ++i) {
+            ceres::CostFunction* b = new ceres::AutoDiffCostFunction<BoundaryPenalty,3,3>(
+                new BoundaryPenalty(min_p, max_p, bound_w)
+            );
+            problem.AddResidualBlock(b, nullptr, controls[i].data());
+        }
 
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;

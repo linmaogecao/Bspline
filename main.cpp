@@ -33,29 +33,29 @@ int main(int argc, char *argv[]){
     string outFileName2 = "01_spline.txt";
 
 
-    BSplineSurface surface(3,3,9,9,0.01);
+    BSplineSurface surface(3,3,15,15,0.05);
 
 
     std::vector<Vector3d> points;
-    readWrite::readData( inFileName, points );
+    //readWrite::readData( inFileName, points );
 
     auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     Eigen::Matrix<double, 3, Eigen::Dynamic> tmp_point_expend;
-    // if (readKitti("/home/albus/dataset/kitti/data_odometry_velodyne/dataset/sequences/", "00", 1, *cloud,tmp_point_expend))
-    // {
-    //     std::cout << "No more PCD file!" << std::endl;
-    //     return false;
-    // }
-    for (auto &p : points) {
-        cloud->points.emplace_back(p.x(), p.y(), p.z());
+    if (!readKitti("/home/albus/dataset/kitti/data_odometry_velodyne/dataset/sequences/", "00", 1, *cloud,tmp_point_expend))
+    {
+        std::cout << "No more PCD file!" << std::endl;
+        return false;
     }
-    std::cout<<"read"<<cloud->size()<<endl;
-    //points.reserve(cloud->points.size());
-    // for (const auto& vec : cloud->points) {
-    //     // Eigen(double) -> PCL(float) 会自动隐式转换
-    //     points.emplace_back(vec.x, vec.y, vec.z);
+    // for (auto &p : points) {
+    //     cloud->points.emplace_back(p.x(), p.y(), p.z());
     // }
-    //readWrite::writeDate(outFileName2, points,true);
+    std::cout<<"read"<<cloud->size()<<endl;
+    points.reserve(cloud->points.size());
+     for (const auto& vec : cloud->points) {
+         // Eigen(double) -> PCL(float) 会自动隐式转换
+         points.emplace_back(vec.x, vec.y, vec.z);
+     }
+    readWrite::writeDate(inFileName, points,true);
 
     //surface.apply(cloud, 50,1,1,0.5);
     std::cout<<"apply"<<endl;
