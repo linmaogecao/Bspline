@@ -15,7 +15,7 @@
  */
 int main(int argc, char *argv[]){
 
-    char inpf[200],*input;
+    char inpf[200],*input,*index_num;
     argc--;
     argv++;					//Skip program name arg
 
@@ -27,13 +27,14 @@ int main(int argc, char *argv[]){
         input = inpf;
     }
     else input    = argv[0];
-
+    if (argc == 2)
+        index_num = argv[1];
     string inFileName( input );
     string outFileName1 = "01_controls.txt";
     string outFileName2 = "01_spline.txt";
 
 
-    BSplineSurface surface(3,3,15,15,0.05);
+    BSplineSurface surface(3,3,15,15,0.25);
 
 
     std::vector<Vector3d> points;
@@ -41,7 +42,7 @@ int main(int argc, char *argv[]){
 
     auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     Eigen::Matrix<double, 3, Eigen::Dynamic> tmp_point_expend;
-    if (!readKitti("/home/albus/dataset/kitti/data_odometry_velodyne/dataset/sequences/", "00", 1, *cloud,tmp_point_expend))
+    if (!readKitti("/home/albus/dataset/kitti/data_odometry_velodyne/dataset/sequences/", "00", 19, *cloud,tmp_point_expend))
     {
         std::cout << "No more PCD file!" << std::endl;
         return false;
@@ -65,21 +66,31 @@ int main(int argc, char *argv[]){
 
         // 1. 生成一些假数据用于测试 (或者替换为 pcl::io::loadPCDFile)
 
-    std::cout << "正在生成测试点云..." << std::endl;
+    // std::cout << "正在生成测试点云..." << std::endl;
     RangeImageProcessor t1;
     t1.generateRangeImage(cloud);
-    SegmentationResult result = t1.segmentRangeImage(5,140,60,0.1,10);
+    SegmentationResult result = t1.segmentRangeImage(5,80,60,0.1,10);
     t1.saveClustersToTxt(result, "output_clusters");
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clouds = t1.generateClusterClouds(result);
+
+    // 体素化: 1m × 1m × 1m, 每个子块至少 5 个点才保留
+    VoxelizedClusters vc = t1.voxelizeClusters(result, 1.0, 5);
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> sub_clouds;
+    t1.saveVoxelizedClustersToTxt(vc, "output_voxels",sub_clouds);
+    // std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> sub_clouds = t1.generateSubClusterClouds(vc);
     // for (auto cloud_single : clouds) {
     //     surface.apply(cloud_single, 50,1,1,0.5);
     //     readWrite::writeDate( outFileName1, surface.getControls(),true);
     //     readWrite::writeDate( outFileName2, surface.getSamples(),true );
     // }
-    // surface.apply(clouds[0], 50,1,1,0.05);
-    // readWrite::writeDate( outFileName1, surface.getControls(),true);
-    // readWrite::writeDate( outFileName2, surface.getSamples(),true );
-    // // std::cout << "正在写入点云数据..." << std::endl;
+    int indexx = std::stoi(index_num);
+    surface.apply(sub_clouds[indexx], 50,1,1,0.05);
+    readWrite::writeDate( outFileName1, surface.getControls(),true);
+    readWrite::writeDate( outFileName2, surface.getSamples(),true );
+
+
+
+    // std::cout << "正在写入点云数据..." << std::endl;
     // std::vector<Vector3d> points_out2;
     // points_out2.resize(5000);
     //

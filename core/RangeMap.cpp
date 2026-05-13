@@ -3,6 +3,7 @@
 //
 
 #include "RangeMap.h"
+#include <sstream>
 
 struct QueueItem {
     int index;
@@ -25,7 +26,7 @@ void RangeImageProcessor::generateRangeImage(const pcl::PointCloud<pcl::PointXYZ
         if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z))
             continue;
         double range = std::sqrt(pt.x * pt.x + pt.y * pt.y + pt.z * pt.z);
-        if (range < 1.0 || range > 50.0) {
+        if (range < MIN_RANGE || range > MAX_RANGE || pt.z < MIN_Z) {
             cnt_1++;
             continue;
         }
@@ -45,13 +46,16 @@ void RangeImageProcessor::generateRangeImage(const pcl::PointCloud<pcl::PointXYZ
             int idx = row * W_COLS + col;
             RangePixel& px = range_image_[idx];
             cnt_2++;
-            if (!px.valid || range < px.range) {
-                px.x = pt.x;
-                px.y = pt.y;
-                px.z = pt.z;
-                px.range = range;
-                px.valid = true;
-            }
+            
+                if (!px.valid || range < px.range)
+                {
+                    px.x = pt.x;
+                    px.y = pt.y;
+                    px.z = pt.z;
+                    px.range = range;
+                    px.valid = true;
+                }
+
         }
 
     }
@@ -174,172 +178,119 @@ bool RangeImageProcessor::computePixelCurvature(int u, int v, std::pair<double, 
     // }
     return valid_any;
 }
-SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, double max_h_curvature, double max_v_curvature, double max_dist, int min_cluster_size) {
+SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, double normal_angle_deg, double max_v_curvature, double max_dist, int min_cluster_size) {
     SegmentationResult result;
-    int pixel_num = H_SCANS * W_COLS;
+    const int pixel_num = H_SCANS * W_COLS;
     result.label_map.assign(pixel_num, 0);
 
-    // 1. 初始化 Valid
+    const double theta_rad = theta_deg * M_PI / 180.0;
+    const double normal_cos_thresh = std::cos(normal_angle_deg * M_PI / 180.0);
+
+    // ---------- 1. 标记有效像素 ----------
     std::vector<bool> pixel_valid(pixel_num, false);
-    double theta_rad = theta_deg * M_PI / 180.0;
-    int test_cnt = 0;
-    for (int i = 0; i < H_SCANS; ++i) {
-        for (int j = 0; j < W_COLS; ++j) {
-            int idx = i * W_COLS + j;
-            if (range_image_[idx].valid) {
-                pixel_valid[idx] = true;
-                test_cnt++;
-            }
+    for (int idx = 0; idx < pixel_num; ++idx) {
+        if (range_image_[idx].valid) pixel_valid[idx] = true;
+    }
+
+    // ---------- 2. 预计算法向量 ----------
+    // 以当前点 P 为顶点, 取左邻居 P_left = P(u, v-1) 和下邻居 P_down = P(u+1, v)
+    // n = (P_left - P) x (P_down - P), 然后归一化
+    // 朝向: 让法向量大致指向传感器原点 O (即 -P 方向)
+    std::vector<Eigen::Vector3d> normals(pixel_num, Eigen::Vector3d::Zero());
+    std::vector<bool> normal_valid(pixel_num, false);
+    for (int u = 0; u < H_SCANS; ++u) {
+        for (int v = 0; v < W_COLS; ++v) {
+            int idx = u * W_COLS + v;
+            if (!pixel_valid[idx]) continue;
+
+            Eigen::Vector3d P, P_left, P_down;
+            if (!getPoint(u, v, P)) continue;
+            if (!getPoint(u, v - 1, P_left)) continue;          // 左邻居 (列周期已处理)
+            if (u + 1 >= H_SCANS) continue;                      // 下邻居超界
+            if (!getPoint(u + 1, v, P_down)) continue;
+
+            Eigen::Vector3d e1 = P_left - P;
+            Eigen::Vector3d e2 = P_down - P;
+            Eigen::Vector3d n = e1.cross(e2);
+            double len = n.norm();
+            if (len < 1e-6) continue;
+            n /= len;
+            // 朝向传感器 (O = 原点, 视线方向是 -P)
+            if (n.dot(-P) < 0) n = -n;
+            normals[idx] = n;
+            normal_valid[idx] = true;
         }
     }
-    std::cout<<"test_cnt: "<<test_cnt<<std::endl;
-    int current_label = 0;
-    int dir_u[8] = {-1, 1, 0, 0, -1, -1, 1, 1};
-    int dir_v[8] = {0, 0, -1, 1, -1, 1, -1, 1};
-    int cluster_cnt = 0;
-    for (int index = 0; index < pixel_num; ++index) {
-        if (!pixel_valid[index]) continue;
-        if (result.label_map[index] != 0) continue;
-        // if (pixel_curvate[index].first < max_h_curvature) {
-        //     if (range_image_[index].y > -10 && range_image_[index].y < -6 && range_image_[index].x >-5 && range_image_[index].x <6) {
-        //         std::cout << "range_image_[cur_index] " << range_image_[index].x << " " << range_image_[index].y << " " << range_image_[index].z<<std::endl;
-        //
-        //         std::cout << "reject self by curvarate : " << pixel_curvate[index].first << " > " << max_h_curvature << std::endl;
-        //     }
-        //     continue;
-        // }
 
-        current_label++;
+    // ---------- 3. BFS 分割 ----------
+    int current_label = 0;
+    const int dir_u[4] = {-1, 1, 0, 0};
+    const int dir_v[4] = { 0, 0,-1, 1};
+
+    for (int seed = 0; seed < pixel_num; ++seed) {
+        if (!pixel_valid[seed]) continue;
+        if (result.label_map[seed] != 0) continue;
+
+        ++current_label;
         std::vector<int> current_cluster;
         std::deque<int> q;
+        result.label_map[seed] = current_label;
+        current_cluster.push_back(seed);
+        q.push_back(seed);
 
-        // 种子入队
-        result.label_map[index] = current_label;
-        current_cluster.push_back(index);
-        q.push_back(index);
-        int last_neighour_idx = -1;
         while (!q.empty()) {
             int cur_index = q.front(); q.pop_front();
-            
             int u = cur_index / W_COLS;
             int v = cur_index % W_COLS;
-            double crange = range_image_[cur_index].range;
-            for (int k = 0; k < 8; ++k) {
-                int found_neighbor_idx = -1;
-                int found_step = 0;
+            const auto& cur_px = range_image_[cur_index];
+            double crange = cur_px.range;
 
-                // 根据方向设定最大跳跃步长 (垂直方向跳跃少一点，水平/对角线跳跃可以多一点)
-                int max_step = (k < 2) ? 2 : 5;
+            for (int k = 0; k < 4; ++k) {
+                int nu = u + dir_u[k];
+                int nv = wrapCol(v + dir_v[k]);
+                if (nu < 0 || nu >= H_SCANS) continue;
 
-                for (int step = 1; step <= max_step; ++step) {
-                    int neighbour_u = u + dir_u[k] * step;
-                    int neighbour_v = wrapCol(v + dir_v[k] * step); // 确保水平方向能 wrap around
+                int n_idx = nu * W_COLS + nv;
+                if (!pixel_valid[n_idx]) continue;
+                if (result.label_map[n_idx] != 0) continue;
 
-                    if (neighbour_u < 0 || neighbour_u >= H_SCANS) break; // 超出上下边界
+                const auto& n_px = range_image_[n_idx];
+                double nrange = n_px.range;
 
-                    int temp_idx = neighbour_u * W_COLS + neighbour_v;
-
-                    if (!pixel_valid[temp_idx]) continue; // 核心：如果是无效点(黑洞)，继续往远处看
-
-                    // 找到了当前方向上*第一个*有效点！
-                    if (result.label_map[temp_idx] == 0) {
-                        found_neighbor_idx = temp_idx;
-                        found_step = step;
-                    }
-                    break; // 极其重要：无论这个点是否满足后续条件，视线已经被挡住，立刻停止在这条射线上的搜索！
-                }
-
-                if (found_neighbor_idx == -1) continue;
-                int n_u = found_neighbor_idx / W_COLS;
-                int n_v = found_neighbor_idx % W_COLS;
-                // if (range_image_[cur_index].y > -8 && range_image_[cur_index].y < -5 && range_image_[cur_index].x >15.8 && range_image_[cur_index].x <17.3) {
-                //     std::cout << "\n[BFS] 当前(u:" << u << ", v:" << v << ") -> 探寻方向k:" << k
-                //               << " 步长:" << found_step << " -> 邻居(u:" << n_u << ", v:" << n_v << ")\n";
-                //     std::cout << "  - 当前点 3D: (" << range_image_[cur_index].x << ", " << range_image_[cur_index].y << ", " << range_image_[cur_index].z << ")\n";
-                //     std::cout << "  - 邻居点 3D: (" << range_image_[found_neighbor_idx].x << ", " << range_image_[found_neighbor_idx].y << ", " << range_image_[found_neighbor_idx].z << ")\n";
-                //     }
-
-                double nrange = range_image_[found_neighbor_idx].range;
-                // Adaptive threshold: larger for farther points, smaller for closer points
+                // ---- 条件 1: 欧氏距离粗筛 (自适应) ----
                 double avg_range = (crange + nrange) * 0.5;
                 double adaptive_max_dist = max_dist + avg_range * 0.02;
-                double dx = range_image_[cur_index].x - range_image_[found_neighbor_idx].x;
-                double dy = range_image_[cur_index].y - range_image_[found_neighbor_idx].y;
-                double dz = range_image_[cur_index].z - range_image_[found_neighbor_idx].z;
-                double min_euclidean_dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-                if (min_euclidean_dist > adaptive_max_dist) {
-                    if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >22 && range_image_[found_neighbor_idx].x <22.2 ) {
-                        std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
-                        std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
-                        std::cout << "REJECTD by Euclidean Dist: " << min_euclidean_dist << " > " << adaptive_max_dist << std::endl;
-                        std::cout<< "u "<<(cur_index / W_COLS) << "v "<<(cur_index % W_COLS) << std::endl;
-                        std::cout<< "n_u "<<(found_neighbor_idx / W_COLS) << "n_v "<<(found_neighbor_idx % W_COLS) << std::endl;
-                    }
-                    continue;
-                }
+                double dx = cur_px.x - n_px.x;
+                double dy = cur_px.y - n_px.y;
+                double dz = cur_px.z - n_px.z;
+                double euc_dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (euc_dist > adaptive_max_dist) continue;
 
-                if (last_neighour_idx > 0) {
-                    double dx_last = range_image_[last_neighour_idx].x - range_image_[found_neighbor_idx].x;
-                    double dy_last = range_image_[last_neighour_idx].y - range_image_[found_neighbor_idx].y;
-                    double dz_last = range_image_[last_neighour_idx].z - range_image_[found_neighbor_idx].z;
-
-                    double min_euclidean_dist_last = std::sqrt(dx_last*dx_last + dy_last*dy_last + dz_last*dz_last);
-                    if (min_euclidean_dist_last > 1.3 * adaptive_max_dist) {
-                        continue;
-                    }
-                    if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >21.6 && range_image_[found_neighbor_idx].x <22.2) {
-                        std::cout << "range_image_[last _neighou_idx]" << range_image_[last_neighour_idx].x << " " << range_image_[last_neighour_idx].y << " " << range_image_[last_neighour_idx].z << std::endl;
-                        std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
-                        std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
-                        std::cout << "ACC by min_euclidean_dist_last Dist: " << min_euclidean_dist_last << " < " << 1.3 * adaptive_max_dist << std::endl;
-                        std::cout<< "u "<<(cur_index / W_COLS) << "v "<<(cur_index % W_COLS) << std::endl;
-                        std::cout<< "n_u "<<(found_neighbor_idx / W_COLS) << "n_v "<<(found_neighbor_idx % W_COLS) << std::endl;
-                        std::cout <<"last_u "<<(last_neighour_idx / W_COLS) << "last_v "<<(last_neighour_idx % W_COLS) << std::endl;
-                        std::cout << "clust" << cluster_cnt << std::endl;
-                    }
-                }
-                last_neighour_idx = cur_index;
-
+                // ---- 条件 2: β 角度判断 (论文公式) ----
+                // β = atan2(d2 * sin α, d1 - d2 * cos α)
                 double d1 = std::max(crange, nrange);
                 double d2 = std::min(crange, nrange);
-                double alpha_rad_base = (k < 2) ? alpha_vert_rad_ : alpha_horiz_rad_;
-                double alpha_rad = alpha_rad_base * found_step;
+                double alpha = (k < 2) ? alpha_vert_rad_ : alpha_horiz_rad_;
+                double denom = d1 - d2 * std::cos(alpha);
+                if (std::abs(denom) < 1e-9) continue;
+                double beta = std::atan2(d2 * std::sin(alpha), denom);
+                if (beta < theta_rad) continue;
 
-                double denom = d1 - d2 * std::cos(alpha_rad);
-                if (std::abs(denom) >= 1e-9) {
-                    double belta = std::atan2(d2 * std::sin(alpha_rad), denom);
-                    theta_rad = k<2 ? 30* M_PI / 180.0 : 2.5 * M_PI / 180.0;
-                    if (belta > theta_rad) {
-                        if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >21.6 && range_image_[found_neighbor_idx].x <22.2) {
-                            std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
-                            std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
-                            std::cout << "ACC by Euclidean Dist: " << min_euclidean_dist << " < " << adaptive_max_dist << std::endl;
-                            std::cout << "ACC by theta_rad : " << belta << " > " << theta_rad << std::endl;
-                            std::cout<< "u "<<(cur_index / W_COLS) << "v "<<(cur_index % W_COLS) << std::endl;
-                            std::cout<< "n_u "<<(found_neighbor_idx / W_COLS) << "n_v "<<(found_neighbor_idx % W_COLS) << std::endl;
-                            std::cout << "clust" << cluster_cnt << std::endl;
-                        }
-                        result.label_map[found_neighbor_idx] = current_label;
-                        current_cluster.push_back(found_neighbor_idx);
-                        q.push_back(found_neighbor_idx);
-                    }
-                    else {
-                        if (range_image_[found_neighbor_idx].y > -6 && range_image_[found_neighbor_idx].y < -5.5 && range_image_[found_neighbor_idx].x >21.6 && range_image_[found_neighbor_idx].x <22.2) {
-                            std::cout << "range_image_[cur_index] " << range_image_[cur_index].x << " " << range_image_[cur_index].y << " " << range_image_[cur_index].z << std::endl;
-                            std::cout << "range_image_[found_neighbor_idx] " << range_image_[found_neighbor_idx].x << " " << range_image_[found_neighbor_idx].y << " " << range_image_[found_neighbor_idx].z << std::endl;
-                            std::cout << "ACC by theta_rad : " << belta << " > " << theta_rad << std::endl;
-                            std::cout << "clust" << cluster_cnt << std::endl;
-                            std::cout<< "u "<<(cur_index / W_COLS) << "v "<<(cur_index % W_COLS) << std::endl;
-                            std::cout<< "n_u "<<(found_neighbor_idx / W_COLS) << "n_v "<<(found_neighbor_idx % W_COLS) << std::endl;
-                        }
-                    }
+                // ---- 条件 3: 法向量一致性 ----
+                if (normal_valid[cur_index] && normal_valid[n_idx]) {
+                    double cos_n = normals[cur_index].dot(normals[n_idx]);
+                    if (cos_n < normal_cos_thresh) continue;
                 }
+
+                // ---- 接受 ----
+                result.label_map[n_idx] = current_label;
+                current_cluster.push_back(n_idx);
+                q.push_back(n_idx);
             }
         }
 
-        if (current_cluster.size() > min_cluster_size) {
+        if ((int)current_cluster.size() > min_cluster_size) {
             result.clusters.push_back(std::move(current_cluster));
-            cluster_cnt++;
         }
     }
     return result;
@@ -451,8 +402,6 @@ std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> RangeImageProcessor::generateCl
     if (result.clusters.empty()) {
         return cloud_list;
     }
-
-    // 遍历每一个聚类
     for (size_t i = 0; i < result.clusters.size(); ++i) {
         const auto& cluster_indices = result.clusters[i];
 
@@ -478,4 +427,118 @@ std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> RangeImageProcessor::generateCl
     }
 
     return cloud_list;
+}
+
+// ============================================================================
+// 体素化分割结果
+// ============================================================================
+VoxelizedClusters RangeImageProcessor::voxelizeClusters(const SegmentationResult& result,
+                                                        double voxel_size,
+                                                        int min_subcluster_size) const {
+    VoxelizedClusters vc;
+    vc.voxel_size = voxel_size;
+    if (voxel_size <= 1e-6) return vc;
+    const double inv_size = 1.0 / voxel_size;
+
+    auto keyFromPoint = [&](double x, double y, double z) {
+        VoxelKey k;
+        k.x = static_cast<int>(std::floor(x * inv_size));
+        k.y = static_cast<int>(std::floor(y * inv_size));
+        k.z = static_cast<int>(std::floor(z * inv_size));
+        return k;
+    };
+
+    // 先按 cluster 遍历, cluster 内按 voxel 分桶
+    for (size_t cid = 0; cid < result.clusters.size(); ++cid) {
+        const auto& cluster_indices = result.clusters[cid];
+        if (cluster_indices.empty()) continue;
+
+        std::unordered_map<VoxelKey, std::vector<int>, VoxelKeyHash> bucket;
+        bucket.reserve(cluster_indices.size() / 4 + 1);
+
+        for (int idx : cluster_indices) {
+            const auto& px = range_image_[idx];
+            if (!px.valid) continue;
+            VoxelKey k = keyFromPoint(px.x, px.y, px.z);
+            bucket[k].push_back(idx);
+        }
+
+        // 每个 (cluster_id, voxel_key) 组合产生一个 SubCluster
+        for (auto& kv : bucket) {
+            if ((int)kv.second.size() < min_subcluster_size) continue;
+
+            SubCluster sc;
+            //cid 聚类的id
+            sc.cluster_id = static_cast<int>(cid);
+            //kvfirst 体素id的key
+            sc.voxel_key = kv.first;
+            //体素包含的range image id'
+            sc.indices = std::move(kv.second);
+
+            int sub_idx = static_cast<int>(vc.sub_clusters.size());
+            vc.sub_clusters.push_back(std::move(sc));
+            vc.voxels[kv.first].sub_cluster_ids.push_back(sub_idx);
+            vc.cluster_to_subclusters[static_cast<int>(cid)].push_back(sub_idx);
+        }
+    }
+
+    std::cout << "[Voxelize] voxel_size=" << voxel_size
+              << "  voxels=" << vc.voxels.size()
+              << "  sub_clusters=" << vc.sub_clusters.size()
+              << "  source_clusters=" << vc.cluster_to_subclusters.size()
+              << std::endl;
+    return vc;
+}
+
+void RangeImageProcessor::saveVoxelizedClustersToTxt(const VoxelizedClusters& vc,
+                                                     const std::string& folder_path,
+                                                     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clouds) const {
+
+    if (vc.sub_clusters.empty()) {
+        std::cout << "No sub-clusters to save!" << std::endl;
+        return;
+    }
+    int cnt = 0;
+    for (const auto& sc : vc.sub_clusters) {
+        auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        std::ostringstream fn;
+        fn << folder_path << "/cluster_" << cnt << ".txt";
+        cnt++;
+        std::ofstream out(fn.str());
+        if (!out.is_open()) {
+            std::cerr << "Cannot open " << fn.str() << std::endl;
+            continue;
+        }
+        out << std::fixed << std::setprecision(4);
+        for (int idx : sc.indices) {
+            const auto& px = range_image_[idx];
+            out << px.x << " " << px.y << " " << px.z << "\n";
+            cloud->push_back(pcl::PointXYZ(px.x, px.y, px.z));
+        }
+        cloud->width = cloud->points.size();
+        cloud->height = 1;
+        cloud->is_dense = true;
+        clouds.push_back(cloud);
+    }
+    std::cout << "Saved " << vc.sub_clusters.size() << " sub-clusters to "
+              << folder_path << std::endl;
+}
+
+std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>
+RangeImageProcessor::generateSubClusterClouds(const VoxelizedClusters& vc) const {
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clouds;
+    clouds.reserve(vc.sub_clusters.size());
+    for (const auto& sc : vc.sub_clusters) {
+        auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+        cloud->reserve(sc.indices.size());
+        for (int idx : sc.indices) {
+            const auto& px = range_image_[idx];
+            cloud->push_back(pcl::PointXYZ(px.x, px.y, px.z));
+        }
+        cloud->width = cloud->points.size();
+        cloud->height = 1;
+        cloud->is_dense = true;
+        clouds.push_back(cloud);
+    }
+    return clouds;
 }

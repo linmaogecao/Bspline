@@ -377,7 +377,7 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
     // else {
     //     axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
     // }
-    axis_h = 0; axis_u = 1; axis_v = 2; // u=x, v=y
+    axis_h = 1; axis_u = 0; axis_v = 2; // u=x, v=y
 
     input_kdtree_.setInputCloud(cloud);
 

@@ -19,7 +19,7 @@ public:
     static bool readData(const string& filename, vector<Vector3d>& points);
 
 
-    static bool writeDate(const string& filename,const vector<Vector3d>& points);
+    static bool writeDate(const string& filename,const vector<Vector3d>& points, bool append);
 
 
 

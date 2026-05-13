@@ -35,24 +35,40 @@ struct SegmentationResult {
     std::vector<std::vector<int>> clusters; // 每个面的索引集合
 };
 
-struct VoxelGrid {
-    double resolution;  // 体素大小，如 0.5m
-    std::unordered_map<std::string, std::vector<int>> voxel_map;  // key: "x_y_z", value: 点索引列表
+// ---------- 体素化分割结果存储 ----------
+// 设计:
+//   - 每个 cluster 跨多个 voxel 时, 会按 voxel 拆分成多个 "SubCluster"
+//   - 每个 SubCluster 记录它来自的全局 cluster_id, 反查就能知道一个 cluster 跨了哪些 voxel
+//   - 一个 voxel 内可能有多个 SubCluster (来自不同的 cluster_id)
+struct VoxelKey {
+    int x = 0, y = 0, z = 0;
+    bool operator==(const VoxelKey& o) const { return x == o.x && y == o.y && z == o.z; }
+};
 
-    VoxelGrid(double res = 0.5) : resolution(res) {}
-
-    std::string getKey(double x, double y, double z) const {
-        int vx = static_cast<int>(std::floor(x / resolution));
-        int vy = static_cast<int>(std::floor(y / resolution));
-        int vz = static_cast<int>(std::floor(z / resolution));
-        return std::to_string(vx) + "_" + std::to_string(vy) + "_" + std::to_string(vz);
+struct VoxelKeyHash {
+    size_t operator()(const VoxelKey& k) const {
+        size_t h1 = std::hash<int>()(k.x);
+        size_t h2 = std::hash<int>()(k.y);
+        size_t h3 = std::hash<int>()(k.z);
+        return h1 ^ (h2 * 73856093u) ^ (h3 * 83492791u);
     }
+};
 
-    void addPoint(const RangePixel& px, int index) {
-        if (!px.valid) return;
-        std::string key = getKey(px.x, px.y, px.z);
-        voxel_map[key].push_back(index);
-    }
+struct SubCluster {
+    int cluster_id = -1;          // 来自哪个全局 cluster (SegmentationResult.clusters 的下标)
+    VoxelKey voxel_key;           // 所在体素
+    std::vector<int> indices;     // range_image_ 中的像素索引
+};
+
+struct VoxelCell {
+    std::vector<int> sub_cluster_ids; // 指向 VoxelizedClusters.sub_clusters 的下标
+};
+
+struct VoxelizedClusters {
+    double voxel_size = 1.0;
+    std::vector<SubCluster> sub_clusters;                                  // 所有子聚类的扁平列表
+    std::unordered_map<VoxelKey, VoxelCell, VoxelKeyHash> voxels;          // 体素 -> 该体素内的子聚类
+    std::unordered_map<int, std::vector<int>> cluster_to_subclusters;      // cluster_id -> 它被拆出的 sub_cluster 下标
 };
 
 
@@ -62,6 +78,9 @@ public:
     const int W_COLS = 1500;
     const float FOV_UP = 2.0f;
     const float FOV_DOWN = -24.8f;
+    const double MIN_RANGE = 1.0;
+    const double MAX_RANGE = 50.0;
+    const double MIN_Z = -1.5;   // 低于此高度的点不进 range image (世界系/雷达系)
     double alpha_vert_rad_;
     double alpha_horiz_rad_;
     std::vector<RangePixel> range_image_;
@@ -99,6 +118,19 @@ public:
     void saveClustersToTxt(const SegmentationResult& result, const std::string& folder_path);
     bool findValidNeighborPt(int u, int v, const Eigen::Vector3d& center_pt, Eigen::Vector3d& neighbor_pt, bool is_vertical = false, int dir = 1) const;
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> generateClusterClouds(const SegmentationResult& result);
+
+    // ---------- 体素化 ----------
+    // 把分割结果按 voxel_size 拆分成"子聚类". 每个跨多 voxel 的 cluster 会被拆成多个 SubCluster.
+    // 跨体素聚类太小 (< min_subcluster_size) 的子块会被丢弃.
+    VoxelizedClusters voxelizeClusters(const SegmentationResult& result,
+                                       double voxel_size = 1.0,
+                                       int min_subcluster_size = 5) const;
+
+    // 把每个 SubCluster 输出到 txt: <folder>/voxel_<x>_<y>_<z>_cid<id>.txt
+    void saveVoxelizedClustersToTxt(const VoxelizedClusters& vc, const std::string& folder_path, std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>& clouds) const;
+
+    // 把每个 SubCluster 转成 PCL 点云, 顺序与 vc.sub_clusters 一致
+    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> generateSubClusterClouds(const VoxelizedClusters& vc) const;
 };
 
 
