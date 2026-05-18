@@ -7,6 +7,154 @@
 #include "readWrite.h"
 #include <RangeMap.h>
 #include <iostream>
+#include <array>
+#include <cmath>
+#include <Eigen/Eigenvalues>
+
+
+namespace {
+
+// ------------------------------------------------------------------
+// PCA + 2D 栅格化 + Moore-Neighbor tracing 提取有序边界
+//
+// 输入: 一个 cluster 的点云 (近似共面)
+// 输出: 沿外轮廓顺序排列的 3D 点 (闭合)
+//
+// 参数:
+//   cell_size : 2D 栅格分辨率, 例如 0.1 m
+//   pad_cells : 栅格外围 padding (>=1, 保证最外圈是空, 边界一定存在邻居为空)
+// ------------------------------------------------------------------
+std::vector<Eigen::Vector3d> extractOrderedBoundary(
+    const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+    double cell_size = 0.1,
+    int pad_cells = 1)
+{
+    std::vector<Eigen::Vector3d> out;
+    if (!cloud || cloud->points.size() < 3) return out;
+
+    const int N = static_cast<int>(cloud->points.size());
+
+    // ---------- 1. PCA: 得到平面坐标系 (u_axis, v_axis, n_axis) ----------
+    Eigen::Matrix<double, 3, Eigen::Dynamic> P(3, N);
+    for (int i = 0; i < N; ++i) {
+        P(0, i) = cloud->points[i].x;
+        P(1, i) = cloud->points[i].y;
+        P(2, i) = cloud->points[i].z;
+    }
+    Eigen::Vector3d centroid = P.rowwise().mean();
+    Eigen::Matrix<double, 3, Eigen::Dynamic> Q = P.colwise() - centroid;
+    Eigen::Matrix3d cov = (Q * Q.transpose()) / static_cast<double>(N);
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov);
+    // eigenvalues() 升序: [小, 中, 大]
+    Eigen::Vector3d u_axis = es.eigenvectors().col(2).normalized(); // 最大方差
+    Eigen::Vector3d v_axis = es.eigenvectors().col(1).normalized();
+    Eigen::Vector3d n_axis = es.eigenvectors().col(0).normalized(); // 法向
+
+    // ---------- 2. 投影到 (u, v) ----------
+    std::vector<double> us(N), vs(N);
+    double u_min =  std::numeric_limits<double>::infinity();
+    double u_max = -std::numeric_limits<double>::infinity();
+    double v_min =  std::numeric_limits<double>::infinity();
+    double v_max = -std::numeric_limits<double>::infinity();
+    double h_sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        Eigen::Vector3d d = Q.col(i);
+        us[i] = d.dot(u_axis);
+        vs[i] = d.dot(v_axis);
+        h_sum += d.dot(n_axis);
+        u_min = std::min(u_min, us[i]);
+        u_max = std::max(u_max, us[i]);
+        v_min = std::min(v_min, vs[i]);
+        v_max = std::max(v_max, vs[i]);
+    }
+    const double h_avg = h_sum / static_cast<double>(N); // 平面到质心的偏移, 一般 ~0
+
+    // ---------- 3. 栅格化 ----------
+    const int W = static_cast<int>(std::ceil((u_max - u_min) / cell_size)) + 2 * pad_cells;
+    const int H = static_cast<int>(std::ceil((v_max - v_min) / cell_size)) + 2 * pad_cells;
+    if (W < 3 || H < 3) return out;
+
+    std::vector<unsigned char> grid(static_cast<size_t>(W) * H, 0);
+    auto idx_of = [&](int x, int y) { return static_cast<size_t>(y) * W + x; };
+    auto cell_of = [&](double u, double v) {
+        int cx = static_cast<int>(std::floor((u - u_min) / cell_size)) + pad_cells;
+        int cy = static_cast<int>(std::floor((v - v_min) / cell_size)) + pad_cells;
+        return std::pair<int,int>(cx, cy);
+    };
+    for (int i = 0; i < N; ++i) {
+        auto [cx, cy] = cell_of(us[i], vs[i]);
+        if (cx >= 0 && cx < W && cy >= 0 && cy < H) grid[idx_of(cx, cy)] = 1;
+    }
+
+    // ---------- 4. Moore-Neighbor tracing (Jacob 停止条件) ----------
+    // 8 邻域顺时针: E, SE, S, SW, W, NW, N, NE
+    const int dx[8] = { 1, 1, 0, -1, -1, -1,  0,  1};
+    const int dy[8] = { 0, 1, 1,  1,  0, -1, -1, -1};
+
+    // 起点: 自下而上、自左而右找第一个 occupied 格 (确保它一定在轮廓上)
+    int sx = -1, sy = -1;
+    for (int y = 0; y < H && sy < 0; ++y) {
+        for (int x = 0; x < W; ++x) {
+            if (grid[idx_of(x, y)]) { sx = x; sy = y; break; }
+        }
+    }
+    if (sx < 0) return out;
+
+    std::vector<std::pair<int,int>> contour;
+    contour.reserve(static_cast<size_t>(2 * (W + H)));
+    contour.emplace_back(sx, sy);
+
+    // 起点的"进入方向" backtrack: 我们从西边过来 (因为是从下往上、左到右扫到的)
+    int backtrack = 4; // W 方向
+    int cur_x = sx, cur_y = sy;
+    bool entered_start_again = false;
+
+    const int max_iter = W * H * 8;
+    for (int iter = 0; iter < max_iter; ++iter) {
+        // 从 backtrack 的下一个方向 (顺时针) 开始扫 8 邻居
+        int start_dir = (backtrack + 1) % 8;
+        int found_dir = -1;
+        for (int k = 0; k < 8; ++k) {
+            int dir = (start_dir + k) % 8;
+            int nx = cur_x + dx[dir];
+            int ny = cur_y + dy[dir];
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+            if (grid[idx_of(nx, ny)]) {
+                found_dir = dir;
+                // 新 backtrack: 旧位置相对新位置的方向 = dir 的反向
+                backtrack = (dir + 4) % 8;
+                cur_x = nx;
+                cur_y = ny;
+                break;
+            }
+        }
+        if (found_dir < 0) break; // 孤立像素
+
+        // 简化的 Jacob 停止条件: 回到起点 (大多数 cluster 形状下足够鲁棒)
+        if (cur_x == sx && cur_y == sy) {
+            if (!entered_start_again) {
+                entered_start_again = true;
+                continue;
+            } else {
+                break;
+            }
+        }
+        contour.emplace_back(cur_x, cur_y);
+    }
+
+    // ---------- 5. 边界格子中心 -> 3D ----------
+    out.reserve(contour.size());
+    for (const auto& [cx, cy] : contour) {
+        double u_c = u_min + (cx - pad_cells + 0.5) * cell_size;
+        double v_c = v_min + (cy - pad_cells + 0.5) * cell_size;
+        Eigen::Vector3d p3 = centroid + u_c * u_axis + v_c * v_axis + h_avg * n_axis;
+        out.push_back(p3);
+    }
+    return out;
+}
+
+} // namespace
 
 
 /*
@@ -32,12 +180,14 @@ int main(int argc, char *argv[]){
     string inFileName( input );
     string outFileName1 = "01_controls.txt";
     string outFileName2 = "01_spline.txt";
+    string outFileName3 = "hull.txt";
 
 
     BSplineSurface surface(3,3,15,15,0.25);
 
 
     std::vector<Vector3d> points;
+    std::vector<Vector3d> points2;
     //readWrite::readData( inFileName, points );
 
     auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
@@ -85,11 +235,19 @@ int main(int argc, char *argv[]){
     // }
     int indexx = std::stoi(index_num);
     surface.apply(sub_clouds[indexx], 50,1,1,0.05);
-    readWrite::writeDate( outFileName1, surface.getControls(),true);
-    readWrite::writeDate( outFileName2, surface.getSamples(),true );
+    readWrite::writeDate( outFileName1, surface.getControls(),false);
+    readWrite::writeDate( outFileName2, surface.getSamples(),false );
 
+    // PCA 投影 + 2D 栅格化 + Moore 边界追踪 -> 有序边界点 (闭合)
+    // cell_size 根据点云密度调; LiDAR 墙面 cluster 一般 0.1~0.3m 比较合适
+    points2 = extractOrderedBoundary(sub_clouds[indexx], /*cell_size=*/0.1, /*pad_cells=*/1);
+    if (points2.empty()) {
+        std::cerr << "警告: 未能提取到有序边界点!" << std::endl;
+    } else {
+        std::cout << "提取到 " << points2.size() << " 个有序边界点" << std::endl;
+    }
 
-
+    readWrite::writeDate(outFileName3, points2, false);
     // std::cout << "正在写入点云数据..." << std::endl;
     // std::vector<Vector3d> points_out2;
     // points_out2.resize(5000);

@@ -22,8 +22,8 @@ def readxyz(inputfile):
 if __name__ == '__main__':
     # === 你的原始路径配置 ===
     input_name = './build/01' 
-    full_path = input_name + '.txt'
-    control_name = input_name + "_controls.txt"
+    full_path = input_name + '.txt'#'./build/hull.txt'
+    control_name = input_name + '.txt' #"_controls.txt"
     spline_name = input_name + "_spline.txt"
     
     # 1. 读取所有数据
@@ -60,7 +60,7 @@ if __name__ == '__main__':
 
     # 5. 绘制拟合后的 B 样条曲面 (绿色点)
     # 注意：把你原来的 `if not sx:` 改成了 `if sx:`，否则读到数据反而不会画图
-    if sx:
+    if  sx:
         ax.scatter(sx, sy, sz, c='lime', marker='.', s=5, label="Fitted Spline", zorder=5)
     else:
         print(f"Warning: No spline points found at {spline_name}")
