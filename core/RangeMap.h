@@ -113,11 +113,16 @@ public:
         return nv;
     }
 
-    bool computePixelCurvature(int u, int v, std::pair<double, double>& curvature);
     SegmentationResult segmentRangeImage(double theta_deg, double max_h_curvature, double max_v_curvature, double max_dist, int min_cluster_size);
     void saveClustersToTxt(const SegmentationResult& result, const std::string& folder_path);
     bool findValidNeighborPt(int u, int v, const Eigen::Vector3d& center_pt, Eigen::Vector3d& neighbor_pt, bool is_vertical = false, int dir = 1) const;
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> generateClusterClouds(const SegmentationResult& result);
+
+    // 单 cluster 点云提取 (避免一次全量, SLAM 场景按需取)
+    pcl::PointCloud<pcl::PointXYZ>::Ptr generateOneClusterCloud(const SegmentationResult& result, int cluster_id) const;
+
+    // 查 cluster 占据的 voxel keys (复用 voxelize 结果, 不重新计算)
+    std::vector<VoxelKey> getClusterOccupiedVoxels(const VoxelizedClusters& vc, int cluster_id) const;
 
     // ---------- 体素化 ----------
     // 把分割结果按 voxel_size 拆分成"子聚类". 每个跨多 voxel 的 cluster 会被拆成多个 SubCluster.

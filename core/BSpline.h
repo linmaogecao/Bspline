@@ -157,6 +157,25 @@ public:
         double min_z, max_z;
         bool has_data = false;
     };
+
+    // PCA 平面坐标系: 用于在斜/竖墙面上做参数化, 替代硬编码的 xy/xz/yz 平面
+    //   centroid   : 点云质心 (PCA 原点)
+    //   u_axis     : 最大方差方向 (参数 u)
+    //   v_axis     : 次大方差方向 (参数 v)
+    //   n_axis     : 最小方差方向 (近似法向)
+    //   u_min/max  : 所有点在 u_axis 上投影的范围
+    //   v_min/max  : 所有点在 v_axis 上投影的范围
+    //   h_avg      : 所有点在 n_axis 上投影的平均值 (一般 ~0, 但保留以备旋转/平移不规整的输入)
+    struct PlaneFrame {
+        Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+        Eigen::Vector3d u_axis   = Eigen::Vector3d::UnitX();
+        Eigen::Vector3d v_axis   = Eigen::Vector3d::UnitY();
+        Eigen::Vector3d n_axis   = Eigen::Vector3d::UnitZ();
+        double u_min = 0.0, u_max = 0.0;
+        double v_min = 0.0, v_max = 0.0;
+        double h_avg = 0.0;
+        bool   valid = false;
+    };
     BSplineSurface(int deg_u,int deg_v,int control_num_u,int control_num_v,double interal=0.01):
         interal_u(interal),interal_v(interal),Deg_u(deg_u),Deg_v(deg_v),controls_num_u(control_num_u),controls_num_v(control_num_v)
     {
@@ -205,6 +224,12 @@ public:
     Vector3d getCurvCenter(const Parameter& para, const vector<double> &knots,const std::vector<Vector3d> &controls);
     double findFootPrint(const vector<Vector3d>& givepoints,vector<pair<Parameter, Parameter>>& footPrints, vector<double> &point_dists);
     void initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,vector<Vector3d>& controlPs,int num_u,int num_v);
+    // PCA 平面 + (u,v) 投影矩形内均匀生成控制点网格. 替代 initControlPoint 的硬编码三标准面方案.
+    // margin_ratio: 在 (u,v) 范围外扩多少比例 (与原 AABB 实现保持一致, 默认 0.15)
+    void initControlPointPCA(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+                             vector<Vector3d>& controlPs, int num_u, int num_v,
+                             double margin_ratio = 0.15);
+    const PlaneFrame& getPlaneFrame() const { return plane_frame_; }
     void setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v,bool isCut = false);
     void setKnotParams(int num_cp_u,int num_cp_v);
     pair<Parameter, Parameter> getPara(int index);
@@ -229,6 +254,9 @@ private:
      * @return
      */
     Eigen::Matrix4d ComputeNonUniformBsplineMatrix(int i, const vector<double>& knots);
+
+    // PCA + (u,v) 投影范围统计, 填充 plane_frame_
+    void computePlaneFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
 
 private:
     double interal_u;
@@ -257,4 +285,5 @@ private:
     int cn1 = 0;
     int cn2 = 0;
     int cn3 = 0;
+    PlaneFrame plane_frame_;
 };

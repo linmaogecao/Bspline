@@ -354,66 +354,129 @@ void BSplineSurface::pclToEigenVector(const pcl::PointCloud<pcl::PointXYZ>::Ptr 
 
 void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, vector<Vector3d> &controlPs, int num_u,
                                       int num_v) {
+    // 默认走 PCA 平面版本; 想回到旧版的硬编码三标准面方案, 在调用方手工切回即可
+    initControlPointPCA(cloud, controlPs, num_u, num_v);
+}
+
+void BSplineSurface::computePlaneFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
+    plane_frame_.valid = false;
+    if (!cloud || cloud->points.size() < 3) return;
+
+    const int N = static_cast<int>(cloud->points.size());
+
+    // 用 Eigen::Map 避免大矩阵拷贝 (但 PCL 的 xyz 是 float, 这里仍要复制成 double)
+    Eigen::Matrix<double, 3, Eigen::Dynamic> P(3, N);
+    for (int i = 0; i < N; ++i) {
+        P(0, i) = cloud->points[i].x;
+        P(1, i) = cloud->points[i].y;
+        P(2, i) = cloud->points[i].z;
+    }
+
+    plane_frame_.centroid = P.rowwise().mean();
+    Eigen::Matrix<double, 3, Eigen::Dynamic> Q = P.colwise() - plane_frame_.centroid;
+    Eigen::Matrix3d cov = (Q * Q.transpose()) / static_cast<double>(N);
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov);
+    // eigenvalues() 升序: [小, 中, 大]
+    plane_frame_.u_axis = es.eigenvectors().col(2).normalized(); // 最大方差
+    plane_frame_.v_axis = es.eigenvectors().col(1).normalized();
+    plane_frame_.n_axis = es.eigenvectors().col(0).normalized(); // 近似法向
+
+    // 统计 (u, v, h) 范围
+    plane_frame_.u_min =  std::numeric_limits<double>::infinity();
+    plane_frame_.u_max = -std::numeric_limits<double>::infinity();
+    plane_frame_.v_min =  std::numeric_limits<double>::infinity();
+    plane_frame_.v_max = -std::numeric_limits<double>::infinity();
+    double h_sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        Eigen::Vector3d d = Q.col(i);
+        double u = d.dot(plane_frame_.u_axis);
+        double v = d.dot(plane_frame_.v_axis);
+        double h = d.dot(plane_frame_.n_axis);
+        plane_frame_.u_min = std::min(plane_frame_.u_min, u);
+        plane_frame_.u_max = std::max(plane_frame_.u_max, u);
+        plane_frame_.v_min = std::min(plane_frame_.v_min, v);
+        plane_frame_.v_max = std::max(plane_frame_.v_max, v);
+        h_sum += h;
+    }
+    plane_frame_.h_avg = h_sum / static_cast<double>(N);
+    plane_frame_.valid = true;
+}
+
+void BSplineSurface::initControlPointPCA(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
+                                         vector<Vector3d>& controlPs, int num_u, int num_v,
+                                         double margin_ratio) {
+    if (!cloud || cloud->points.size() < 3 || num_u < 2 || num_v < 2) return;
+
+    // ----- 1. PCA 平面坐标系 -----
+    computePlaneFrame(cloud);
+    if (!plane_frame_.valid) return;
+
+    // ----- 2. 全局 AABB 仍要保存, 供 isPointValid / buildRangeGrid 使用 -----
     Eigen::Vector4f min_pt_4f, max_pt_4f;
     pcl::getMinMax3D(*cloud, min_pt_4f, max_pt_4f);
-    Vector3d min_pt(min_pt_4f[0], min_pt_4f[1], min_pt_4f[2]);
-    Vector3d max_pt(max_pt_4f[0], max_pt_4f[1], max_pt_4f[2]);
-    max_x = max_pt(0); min_x = min_pt(0);
-    max_y = max_pt(1); min_y = min_pt(1);
-    max_z = max_pt(2); min_z = min_pt(2);
-    std::cout <<max_x<<" "<<max_y<<" "<<max_z<<min_x<<" "<<min_y<<" "<<min_z<<endl;
-    Vector3d range = max_pt - min_pt;
-    Vector3d margin = range * 0.15;
-    min_pt -= margin;
-    max_pt += margin;
-    range = max_pt - min_pt;
-    int axis_u, axis_v, axis_h;
-    // if (range.x() <= range.y() && range.x() <= range.z()) {
-    //     axis_h = 0; axis_u = 1; axis_v = 2; // u=y, v=z
-    // }
-    // else if (range.y() <= range.x() && range.y() <= range.z()) {
-    //     axis_h = 1; axis_u = 0; axis_v = 2; // u=x, v=z
-    // }
-    // else {
-    //     axis_h = 2; axis_u = 0; axis_v = 1; // u=x, v=y
-    // }
-    axis_h = 1; axis_u = 0; axis_v = 2; // u=x, v=y
+    max_x = max_pt_4f[0]; min_x = min_pt_4f[0];
+    max_y = max_pt_4f[1]; min_y = min_pt_4f[1];
+    max_z = max_pt_4f[2]; min_z = min_pt_4f[2];
 
-    input_kdtree_.setInputCloud(cloud);
+    // ----- 3. KD-tree (3D) 用于每个控制点找最近邻 -> 估计法向偏移 h -----
+    //input_kdtree_.setInputCloud(cloud);
 
-    double u_step = range[axis_u] / (num_u - 1);
-    double v_step = range[axis_v] / (num_v - 1);
-    double h_query = min_pt[axis_h];
+    // ----- 4. (u, v) 矩形 + margin -----
+    const double u_range = plane_frame_.u_max - plane_frame_.u_min;
+    const double v_range = plane_frame_.v_max - plane_frame_.v_min;
+    const double u_lo = plane_frame_.u_min - margin_ratio * u_range;
+    const double u_hi = plane_frame_.u_max + margin_ratio * u_range;
+    const double v_lo = plane_frame_.v_min - margin_ratio * v_range;
+    const double v_hi = plane_frame_.v_max + margin_ratio * v_range;
+
+    const double u_step = (u_hi - u_lo) / (num_u - 1);
+    const double v_step = (v_hi - v_lo) / (num_v - 1);
+
+    controlPs.assign(num_u * num_v, Vector3d::Zero());
+
+    // ----- 5. 在 (u, v) 上均匀取点 -> 3D KD-tree 找最近邻 -> 用最近邻在 n 方向的投影做高度 -----
     for (int i = 0; i < num_u; ++i) {
         for (int j = 0; j < num_v; ++j) {
-            double cur_u = min_pt[axis_u] + i * u_step;
-            double cur_v = min_pt[axis_v] + j * v_step;
+            const double cu = u_lo + i * u_step;
+            const double cv = v_lo + j * v_step;
 
-            Vector3d pos;
-            pos(axis_u) = cur_u;
-            pos(axis_v) = cur_v;
-            pcl::PointXYZ searchPoint;
-            searchPoint.x = (axis_u == 0) ? cur_u : ((axis_v == 0) ? cur_v : 0);
-            searchPoint.y = (axis_u == 1) ? cur_u : ((axis_v == 1) ? cur_v : 0);
-            searchPoint.z = (axis_u == 2) ? cur_u : ((axis_v == 2) ? cur_v : 0);
-            if(axis_h == 0) searchPoint.x = h_query;
-            else if(axis_h == 1) searchPoint.y = h_query;
-            else searchPoint.z = h_query;
-            std::vector<int> pointIdxNKNSearch(1);
-            std::vector<float> pointNKNSquaredDistance(1);
-            if (input_kdtree_.nearestKSearch(searchPoint, 1, pointIdxNKNSearch, pointNKNSquaredDistance) > 0) {
-                // 找到了最近点，只取它的高度！
-                pcl::PointXYZ nearest_pt = cloud->points[pointIdxNKNSearch[0]];
-                if (axis_h == 0) pos(axis_h) = nearest_pt.x;
-                else if (axis_h == 1) pos(axis_h) = nearest_pt.y;
-                else pos(axis_h) = nearest_pt.z;
-            } else {
-                // 找不到就用平均值
-                pos(axis_h) = h_query;
-            }
-            controlPs[i * num_v + j] = pos;
+            // // 落在平面上的 3D 查询点 (高度先用 h_avg)
+            // const Vector3d query_3d = plane_frame_.centroid
+            //                         + cu * plane_frame_.u_axis
+            //                         + cv * plane_frame_.v_axis
+            //                         + plane_frame_.h_avg * plane_frame_.n_axis;
+            //
+            // pcl::PointXYZ q;
+            // q.x = static_cast<float>(query_3d.x());
+            // q.y = static_cast<float>(query_3d.y());
+            // q.z = static_cast<float>(query_3d.z());
+            //
+            // std::vector<int>   idx(1);
+            // std::vector<float> sqdist(1);
+
+            double h = plane_frame_.h_avg;
+            // if (input_kdtree_.nearestKSearch(q, 1, idx, sqdist) > 0) {
+            //     const auto& np = cloud->points[idx[0]];
+            //     Vector3d d(np.x - plane_frame_.centroid.x(),
+            //                np.y - plane_frame_.centroid.y(),
+            //                np.z - plane_frame_.centroid.z());
+            //     h = d.dot(plane_frame_.n_axis); // 最近邻在 n 方向的投影 -> 控制点高度
+            // }
+
+            const Vector3d cp = plane_frame_.centroid
+                              + cu * plane_frame_.u_axis
+                              + cv * plane_frame_.v_axis
+                              + h  * plane_frame_.n_axis;
+            controlPs[i * num_v + j] = cp;
         }
     }
+
+    std::cout << "[initControlPointPCA] "
+              << "n_axis=" << plane_frame_.n_axis.transpose()
+              << " | u_range=[" << plane_frame_.u_min << "," << plane_frame_.u_max
+              << "] v_range=[" << plane_frame_.v_min << "," << plane_frame_.v_max << "]"
+              << " | h_avg=" << plane_frame_.h_avg << std::endl;
 }
 bool BSplineSurface::isPointValid(const Vector3d& p) {
     double global_margin = 0.03;

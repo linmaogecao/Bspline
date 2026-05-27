@@ -224,7 +224,7 @@ int main(int argc, char *argv[]){
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clouds = t1.generateClusterClouds(result);
 
     // 体素化: 1m × 1m × 1m, 每个子块至少 5 个点才保留
-    VoxelizedClusters vc = t1.voxelizeClusters(result, 1.0, 5);
+    VoxelizedClusters vc = t1.voxelizeClusters(result, 3.0, 5);
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> sub_clouds;
     t1.saveVoxelizedClustersToTxt(vc, "output_voxels",sub_clouds);
     // std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> sub_clouds = t1.generateSubClusterClouds(vc);
@@ -234,13 +234,13 @@ int main(int argc, char *argv[]){
     //     readWrite::writeDate( outFileName2, surface.getSamples(),true );
     // }
     int indexx = std::stoi(index_num);
-    surface.apply(sub_clouds[indexx], 50,1,1,0.05);
+    surface.apply(clouds[indexx], 50,1,1,0.05);
     readWrite::writeDate( outFileName1, surface.getControls(),false);
     readWrite::writeDate( outFileName2, surface.getSamples(),false );
 
     // PCA 投影 + 2D 栅格化 + Moore 边界追踪 -> 有序边界点 (闭合)
     // cell_size 根据点云密度调; LiDAR 墙面 cluster 一般 0.1~0.3m 比较合适
-    points2 = extractOrderedBoundary(sub_clouds[indexx], /*cell_size=*/0.1, /*pad_cells=*/1);
+    points2 = extractOrderedBoundary(clouds[indexx], /*cell_size=*/0.1, /*pad_cells=*/1);
     if (points2.empty()) {
         std::cerr << "警告: 未能提取到有序边界点!" << std::endl;
     } else {

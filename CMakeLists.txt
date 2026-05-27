@@ -6,10 +6,12 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PCL_DIR "/opt/pcl-1.13/share/pcl-1.13")
-find_package(PCL REQUIRED COMPONENTS common io kdtree search)
+find_package(PCL REQUIRED COMPONENTS common io kdtree search surface)
 add_definitions(${PCL_DEFINITIONS})
 link_directories(${PCL_LIBRARY_DIRS})
 
+find_package(VTK REQUIRED)
+include(${VTK_USE_FILE})
 # 4. Include Directories
 include_directories(
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -51,6 +53,7 @@ else()
 endif()
 
 find_package(OpenMP REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # 4. Include Directories
 include_directories(
@@ -60,13 +63,16 @@ include_directories(
     ${ANN_INCLUDE_DIR}
     ${PCL_INCLUDE_DIRS}
     ${CERES_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
 )
 
 # 5. Source Files
 set(SOURCE_FILES
     core/BSpline.cpp
+    core/RangeMap.cpp
     core/BSplineSurface.cpp
     core/Spline_curve_fitting.cpp
+    core/tool.cpp
     readWrite.cpp
     main.cpp
 )
@@ -76,9 +82,9 @@ set(HEADER_FILES
     core/BSpline.h
     core/Spline_curve_fitting.h
     readWrite.h
-        core/BSplineSDMErr.h
-        core/RangeMap.cpp
-        core/RangeMap.h
+    core/BSplineSDMErr.h
+    core/RangeMap.h
+    core/tool.h
 )
 
 # 7. Create Executable
@@ -88,6 +94,8 @@ add_executable(spline_fitting_test ${SOURCE_FILES} ${HEADER_FILES})
 target_link_libraries(spline_fitting_test
     ${ANN_LIBRARY}
     ${PCL_LIBRARIES}
+    ${OpenCV_LIBS}
+    ${VTK_LIBRARIES}
     Ceres::ceres
     OpenMP::OpenMP_CXX
 )

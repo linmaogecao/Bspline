@@ -46,15 +46,14 @@ void RangeImageProcessor::generateRangeImage(const pcl::PointCloud<pcl::PointXYZ
             int idx = row * W_COLS + col;
             RangePixel& px = range_image_[idx];
             cnt_2++;
-            
-                if (!px.valid || range < px.range)
-                {
-                    px.x = pt.x;
-                    px.y = pt.y;
-                    px.z = pt.z;
-                    px.range = range;
-                    px.valid = true;
-                }
+            if (!px.valid || range < px.range)
+            {
+                px.x = pt.x;
+                px.y = pt.y;
+                px.z = pt.z;
+                px.range = range;
+                px.valid = true;
+            }
 
         }
 
@@ -70,7 +69,7 @@ void RangeImageProcessor::generateRangeImage(const pcl::PointCloud<pcl::PointXYZ
             cnt++;
         }
     }
-    saveRangeImageBin("test1.bin");
+    //saveRangeImageBin("test1.bin");
     std::cout<<"init cnt "<<cnt<<" "<<cnt_1<<" "<<cnt_2<<std::endl;
 }
 
@@ -110,74 +109,6 @@ void RangeImageProcessor::saveRangeImageBin(const std::string& filename) {
     std::cout << ">>> Range Image 已成功保存至: " << filename << " <<<\n";
 }
 
-bool RangeImageProcessor::computePixelCurvature(int u, int v, std::pair<double, double>& curvature) {
-    Eigen::Vector3d center_pt;
-    curvature.first = -1.0;
-    curvature.second = -1.0;
-
-    bool valid_any = false; //confirm  one direction has curvrate
-    if (!getPoint(u, v, center_pt)) return false;
-
-    Eigen::Vector3d left_pt, right_pt;
-    bool is_left_valid = findValidNeighborPt(u,v,center_pt,left_pt,false,1);
-    bool is_right_valid =findValidNeighborPt(u,v,center_pt,right_pt,false,-1);
-
-    if (is_left_valid && is_right_valid) {
-        Eigen::Vector3d v_left = left_pt - center_pt;
-        Eigen::Vector3d v_right = right_pt - center_pt;
-        double norm_l = v_left.norm();
-        double norm_r = v_right.norm();
-        if (norm_l > 1e-3 && norm_r > 1e-3) {
-            // 3. 计算 Cosine 值
-            double dot_product = v_left.dot(v_right);
-            double cos_theta = dot_product / (norm_l * norm_r);
-
-            // 钳制数值防止 acos 越界 (比如计算误差导致 1.000001)
-            if (cos_theta > 1.0) cos_theta = 1.0;
-            if (cos_theta < -1.0) cos_theta = -1.0;
-
-            // 4. 计算角度 (弧度 -> 度)
-            double angle_rad = std::acos(cos_theta);
-            double angle_deg = angle_rad * 180.0 / M_PI;
-            // if (angle_deg < 130 && (center_pt.x() > 2.1 || center_pt.x() < 1.9 || center_pt.y() >2.1|| center_pt.y() <1.9)) {
-            //     std::cout << "center: "<<center_pt.transpose()<<std::endl;
-            //     std::cout << "left_pt: "<<left_pt.transpose()<<std::endl;
-            //     std::cout << "right_pt: "<<right_pt.transpose()<<std::endl;
-            //     std::cout << "v_left: "<<v_left.transpose()<<std::endl;
-            //     std::cout << "v_right: "<<v_right.transpose()<<std::endl;
-            //     std::cout << "cos_theta: "<<angle_deg<<std::endl;
-            // }
-            curvature.first = angle_deg;
-
-            valid_any = true;
-        }
-    }
-
-    // Eigen::Vector3d up_pt, down_pt;
-    // bool is_up_valid = findValidNeighborPt(u,v,center_pt,up_pt,true,1);
-    // bool is_down_valid =findValidNeighborPt(u,v,center_pt,down_pt,true,-1);
-    // if (is_up_valid && is_down_valid)
-    // {
-    //     Eigen::Vector3d v_up = up_pt - center_pt;
-    //     Eigen::Vector3d v_down = down_pt - center_pt;
-    //
-    //     double norm_u = v_up.norm();
-    //     double norm_d = v_down.norm();
-    //     if (norm_u > 1e-3 && norm_d > 1e-3) {
-    //         double dot_product = v_up.dot(v_down);
-    //         double cos_theta = dot_product / (norm_u * norm_d);
-    //
-    //         if (cos_theta > 1.0) cos_theta = 1.0;
-    //         if (cos_theta < -1.0) cos_theta = -1.0;
-    //
-    //         double angle_deg = std::acos(cos_theta) * 180.0 / M_PI;
-    //
-    //         curvature.second = angle_deg;
-    //         valid_any = true;
-    //     }
-    // }
-    return valid_any;
-}
 SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, double normal_angle_deg, double max_v_curvature, double max_dist, int min_cluster_size) {
     SegmentationResult result;
     const int pixel_num = H_SCANS * W_COLS;
@@ -243,7 +174,7 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
             int u = cur_index / W_COLS;
             int v = cur_index % W_COLS;
             const auto& cur_px = range_image_[cur_index];
-            double crange = cur_px.range;
+            double crange = cur_px.range;//当前点到雷达距离
 
             for (int k = 0; k < 4; ++k) {
                 int nu = u + dir_u[k];
@@ -255,11 +186,16 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                 if (result.label_map[n_idx] != 0) continue;
 
                 const auto& n_px = range_image_[n_idx];
-                double nrange = n_px.range;
+                double nrange = n_px.range;//选中点到雷达的距离
 
-                // ---- 条件 1: 欧氏距离粗筛 (自适应) ----
+                // ---- 条件 1: 欧氏距离粗筛 (基于角分辨率自适应) ----
+                // 同一 scan 相邻两束光在距离 r 处的自然点间距 ≈ r * alpha_rad
+                // k<2 为垂直方向邻居, k>=2 为水平方向邻居, 二者角分辨率不同
                 double avg_range = (crange + nrange) * 0.5;
-                double adaptive_max_dist = max_dist + avg_range * 0.02;
+                double angle_res = (k < 2) ? alpha_vert_rad_ : alpha_horiz_rad_;
+                // 容差系数 2.5: 允许倾斜面使点间距最多扩大到自然间距的 2.5 倍
+                // 同时保留 max_dist 作为近距离的绝对下限, 防止阈值过小
+                double adaptive_max_dist = std::max(max_dist, avg_range * angle_res * 2.5);
                 double dx = cur_px.x - n_px.x;
                 double dy = cur_px.y - n_px.y;
                 double dz = cur_px.z - n_px.z;
@@ -276,11 +212,11 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
                 double beta = std::atan2(d2 * std::sin(alpha), denom);
                 if (beta < theta_rad) continue;
 
-                // ---- 条件 3: 法向量一致性 ----
-                if (normal_valid[cur_index] && normal_valid[n_idx]) {
-                    double cos_n = normals[cur_index].dot(normals[n_idx]);
-                    if (cos_n < normal_cos_thresh) continue;
-                }
+                // // ---- 条件 3: 法向量一致性 ----
+                // if (normal_valid[cur_index] && normal_valid[n_idx]) {
+                //     double cos_n = normals[cur_index].dot(normals[n_idx]);
+                //     if (cos_n < normal_cos_thresh) continue;
+                // }
 
                 // ---- 接受 ----
                 result.label_map[n_idx] = current_label;
@@ -396,6 +332,37 @@ bool RangeImageProcessor::findValidNeighborPt(int u, int v, const Eigen::Vector3
     return found;
 }
 
+pcl::PointCloud<pcl::PointXYZ>::Ptr
+RangeImageProcessor::generateOneClusterCloud(const SegmentationResult& result, int cluster_id) const {
+    auto cloud = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    if (cluster_id < 0 || cluster_id >= (int)result.clusters.size()) return cloud;
+    const auto& indices = result.clusters[cluster_id];
+    cloud->reserve(indices.size());
+    for (int idx : indices) {
+        if (idx < 0 || idx >= (int)range_image_.size()) continue;
+        const auto& px = range_image_[idx];
+        if (!px.valid) continue;
+        cloud->push_back(pcl::PointXYZ(px.x, px.y, px.z));
+    }
+    cloud->width  = cloud->points.size();
+    cloud->height = 1;
+    cloud->is_dense = true;
+    return cloud;
+}
+
+std::vector<VoxelKey>
+RangeImageProcessor::getClusterOccupiedVoxels(const VoxelizedClusters& vc, int cluster_id) const {
+    std::vector<VoxelKey> out;
+    auto it = vc.cluster_to_subclusters.find(cluster_id);
+    if (it == vc.cluster_to_subclusters.end()) return out;
+    out.reserve(it->second.size());
+    for (int sub_id : it->second) {
+        if (sub_id < 0 || sub_id >= (int)vc.sub_clusters.size()) continue;
+        out.push_back(vc.sub_clusters[sub_id].voxel_key);
+    }
+    return out;
+}
+
 std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> RangeImageProcessor::generateClusterClouds(const SegmentationResult& result) {
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cloud_list;
 
@@ -404,7 +371,6 @@ std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> RangeImageProcessor::generateCl
     }
     for (size_t i = 0; i < result.clusters.size(); ++i) {
         const auto& cluster_indices = result.clusters[i];
-
         // 创建一个新的点云对象
         pcl::PointCloud<pcl::PointXYZ>::Ptr current_cluster(new pcl::PointCloud<pcl::PointXYZ>);
 
@@ -412,11 +378,28 @@ std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> RangeImageProcessor::generateCl
         current_cluster->reserve(cluster_indices.size());
 
         // 遍历索引填充点
+        int bool1 = false;
+        int bool2 = false;
+        int bool3 = false;
         for (int idx : cluster_indices) {
             const auto& px = range_image_[idx];
             current_cluster->push_back(pcl::PointXYZ(px.x, px.y, px.z));
-        }
+            if (px.x > -4 && px.x < -2 && px.y > 11 && px.y < 12 ) {
+                //std::cout<<"px.x "<<px.x<<" px.y "<<px.y<<std::endl;
+                bool1 = true;
+            }
 
+            if (px.x > 0 && px.x < 2 && px.y > 11 && px.y < 12 ) {
+                bool2 = true;
+            }
+            if (px.x > 2 && px.x < 4 && px.y > 11 && px.y < 12 ) {
+                bool3 = true;
+            }
+
+        }
+        if (bool1 && bool2 && bool3) {
+            std::cout << "Saved ------" << i << std::endl;
+        }
         // 设置点云属性
         current_cluster->width = current_cluster->points.size();
         current_cluster->height = 1;
@@ -510,10 +493,23 @@ void RangeImageProcessor::saveVoxelizedClustersToTxt(const VoxelizedClusters& vc
             continue;
         }
         out << std::fixed << std::setprecision(4);
+        int bool1 = false;
+        int bool2 = false;
         for (int idx : sc.indices) {
             const auto& px = range_image_[idx];
             out << px.x << " " << px.y << " " << px.z << "\n";
             cloud->push_back(pcl::PointXYZ(px.x, px.y, px.z));
+            if (px.x > -9 && px.x < -8.5 && px.y > -6.5 && px.y < -6.25 ) {
+                //std::cout<<"px.x "<<px.x<<" px.y "<<px.y<<std::endl;
+                bool1 = true;
+            }
+
+            if (px.x > -8.75 && px.x < -8.5 && px.y > -7 && px.y < -6.6 ) {
+                bool2 = true;
+            }
+        }
+        if (bool1 && bool2) {
+            std::cout << "Saved " << cnt << std::endl;
         }
         cloud->width = cloud->points.size();
         cloud->height = 1;
