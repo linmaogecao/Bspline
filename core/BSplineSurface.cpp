@@ -30,10 +30,9 @@ Vector3d BSplineSurface::getPos(const Parameter& paraU, const Parameter& paraV, 
 
     Vector3d pos = Vector3d::Zero();
     for (int i = 0; i < 4; ++i) {
+        int global_u_idx = ki_u - 3 + i;
         for (int j = 0; j < 4; ++j) {
-            int global_u_idx = ki_u - 3 + i;
             int global_v_idx = ki_v - 3 + j;
-
             int flat_index = global_u_idx * num_cp_v + global_v_idx;
 
             if (flat_index >= 0 && flat_index < controls.size()) {
@@ -356,6 +355,33 @@ void BSplineSurface::initControlPoint(const pcl::PointCloud<pcl::PointXYZ>::Ptr&
                                       int num_v) {
     // 默认走 PCA 平面版本; 想回到旧版的硬编码三标准面方案, 在调用方手工切回即可
     initControlPointPCA(cloud, controlPs, num_u, num_v);
+    // const double cx = 10.5;
+    // const double cy = -9.0;
+    // const double r = 3.6;
+    //
+    // const int num_points = 20;
+    //
+    // // 角度范围（弧度）
+    // double start_deg = 45.0;
+    // double end_deg   = 225.0;
+    //
+    // double start_rad = start_deg * M_PI / 180.0;
+    // double end_rad   = end_deg   * M_PI / 180.0;
+    //
+    // // 步长（包含首尾）
+    // double step = (end_rad - start_rad) / (num_points - 1);
+    //
+    // controlPs.assign(num_u * num_v, Vector3d::Zero());
+    // for (int i = 0; i < num_u; ++i) {
+    //     double zz = 1.6 - i*0.2;
+    //     for (int j = 0; j < num_v; ++j) {
+    //         double theta = start_rad + j * step;
+    //         double xx = cx + r * std::cos(theta);
+    //         double yy = cy + r * std::sin(theta);
+    //         controlPs[i * num_u + j] = Vector3d(xx, yy, zz);
+    //     }
+    // }
+    // readWrite::writeDate("./../build/initial_control.txt", controlPs, false);
 }
 
 void BSplineSurface::computePlaneFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud) {
@@ -442,27 +468,27 @@ void BSplineSurface::initControlPointPCA(const pcl::PointCloud<pcl::PointXYZ>::P
             const double cv = v_lo + j * v_step;
 
             // // 落在平面上的 3D 查询点 (高度先用 h_avg)
-            // const Vector3d query_3d = plane_frame_.centroid
-            //                         + cu * plane_frame_.u_axis
-            //                         + cv * plane_frame_.v_axis
-            //                         + plane_frame_.h_avg * plane_frame_.n_axis;
-            //
-            // pcl::PointXYZ q;
-            // q.x = static_cast<float>(query_3d.x());
-            // q.y = static_cast<float>(query_3d.y());
-            // q.z = static_cast<float>(query_3d.z());
-            //
-            // std::vector<int>   idx(1);
-            // std::vector<float> sqdist(1);
+            const Vector3d query_3d = plane_frame_.centroid
+                                    + cu * plane_frame_.u_axis
+                                    + cv * plane_frame_.v_axis
+                                    + plane_frame_.h_avg * plane_frame_.n_axis;
+
+            pcl::PointXYZ q;
+            q.x = static_cast<float>(query_3d.x());
+            q.y = static_cast<float>(query_3d.y());
+            q.z = static_cast<float>(query_3d.z());
+
+            std::vector<int>   idx(1);
+            std::vector<float> sqdist(1);
 
             double h = plane_frame_.h_avg;
-            // if (input_kdtree_.nearestKSearch(q, 1, idx, sqdist) > 0) {
-            //     const auto& np = cloud->points[idx[0]];
-            //     Vector3d d(np.x - plane_frame_.centroid.x(),
-            //                np.y - plane_frame_.centroid.y(),
-            //                np.z - plane_frame_.centroid.z());
-            //     h = d.dot(plane_frame_.n_axis); // 最近邻在 n 方向的投影 -> 控制点高度
-            // }
+            if (input_kdtree_.nearestKSearch(q, 1, idx, sqdist) > 0) {
+                const auto& np = cloud->points[idx[0]];
+                Vector3d d(np.x - plane_frame_.centroid.x(),
+                           np.y - plane_frame_.centroid.y(),
+                           np.z - plane_frame_.centroid.z());
+                h = d.dot(plane_frame_.n_axis); // 最近邻在 n 方向的投影 -> 控制点高度
+            }
 
             const Vector3d cp = plane_frame_.centroid
                               + cu * plane_frame_.u_axis
@@ -471,12 +497,6 @@ void BSplineSurface::initControlPointPCA(const pcl::PointCloud<pcl::PointXYZ>::P
             controlPs[i * num_v + j] = cp;
         }
     }
-
-    std::cout << "[initControlPointPCA] "
-              << "n_axis=" << plane_frame_.n_axis.transpose()
-              << " | u_range=[" << plane_frame_.u_min << "," << plane_frame_.u_max
-              << "] v_range=[" << plane_frame_.v_min << "," << plane_frame_.v_max << "]"
-              << " | h_avg=" << plane_frame_.h_avg << std::endl;
 }
 bool BSplineSurface::isPointValid(const Vector3d& p) {
     double global_margin = 0.03;
@@ -572,23 +592,16 @@ void BSplineSurface::setNewControl(const vector<Vector3d> &controlPs, int num_u,
                     Parameter paraV(j, global_v);
 
                     Vector3d p = getPos(paraU, paraV, knots_u, knots_v, controls, controls_num_v);
-                    if (isPointValid(p))
-                        {
-                        valid_cnt++;
-                        positions.push_back(p);
-                        sampling_paras_.push_back(std::make_pair(paraU, paraV));
-                        }
-                    else if (isCut) {
-                        positions.push_back(p);
-                        sampling_paras_.push_back(std::make_pair(paraU, paraV));
-                    }
+                    positions.push_back(p);
+                    sampling_paras_.push_back(std::make_pair(paraU, paraV));
+
 
                 }
             }
         }
     }
-    std::cout<<"cn1 "<<cn1<<" cn2 "<<cn2<<" cn3 "<<cn3<<std::endl;
-    std::cout<<"positions size:"<<positions.size()<<" :"<<valid_cnt<<std::endl;
+    //std::cout<<"cn1 "<<cn1<<" cn2 "<<cn2<<" cn3 "<<cn3<<std::endl;
+    //std::cout<<"positions size:"<<positions.size()<<" :"<<valid_cnt<<std::endl;
 }
 
 void BSplineSurface::setKnotParams(int num_cp_u,int num_cp_v) {
@@ -683,16 +696,41 @@ double BSplineSurface::apply(
         double eplison )
 {
 
+    auto ms_since = [](std::chrono::high_resolution_clock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+    };
+    auto t0 = std::chrono::high_resolution_clock::now();
+
     this->input_cloud_ = points;
+
     //std::cout<<"point size<<"<<points->size()<<std::endl;
     this->input_kdtree_.setInputCloud(points);
+    double t_kdtree = ms_since(t0); t0 = std::chrono::high_resolution_clock::now();
     vector<Vector3d> controlPs;
-    controlPs.resize(controls_num_u * controls_num_v);
 
-    initControlPoint(points, controlPs,controls_num_u, controls_num_v);
+    const int expected = controls_num_u * controls_num_v;
+    if (!ext_init_controls_.empty() && (int)ext_init_controls_.size() == expected) {
+        // 使用外部提供的初始控制点（range-image 行列采样），跳过 PCA 初始化
+        controlPs = ext_init_controls_;
+        // AABB 仍需更新，供 isPointValid / buildRangeGrid 使用
+        Eigen::Vector4f min_pt_4f, max_pt_4f;
+        pcl::getMinMax3D(*points, min_pt_4f, max_pt_4f);
+        max_x = max_pt_4f[0]; min_x = min_pt_4f[0];
+        max_y = max_pt_4f[1]; min_y = min_pt_4f[1];
+        max_z = max_pt_4f[2]; min_z = min_pt_4f[2];
+    } else {
+        controlPs.resize(expected);
+        initControlPoint(points, controlPs, controls_num_u, controls_num_v);
+    }
+    double t_init = ms_since(t0); t0 = std::chrono::high_resolution_clock::now();
+
     buildRangeGrid(points, 50);
-    setNewControl(controlPs,controls_num_u,controls_num_v);
+    double t_grid = ms_since(t0); t0 = std::chrono::high_resolution_clock::now();
     setKnotParams(controls_num_u, controls_num_v);
+    setNewControl(controlPs,controls_num_u,controls_num_v);
+    double t_set = ms_since(t0); t0 = std::chrono::high_resolution_clock::now();
+
     // update the control point
     // compute P"(t)
     // MatrixXd pm = spline_surface->getSIntegralSq();
@@ -704,13 +742,29 @@ double BSplineSurface::apply(
     double last_error = 1e9;
     vector<Vector3d> givepoints;
     pclToEigenVector(points, givepoints);
-    int point_num = givepoints.size();bool stop_flag = false;
+    double t_vec = ms_since(t0);
+    // std::cout << std::fixed << std::setprecision(2)
+    //       << "[apply init] kdtree=" << t_kdtree << "ms initCP=" << t_init
+    //       << "ms grid=" << t_grid
+    //       << "ms pcl2eigen=" << t_vec << "ms"
+    //       << " pts=" << givepoints.size() << std::endl;
 
+    int point_num = givepoints.size();bool stop_flag = false;
+    double sum_fp = 0.0;
+    double sum_pre = 0.0;
+    double sum_data_res = 0.0;
+    double sum_smooth = 0.0;
+    double sum_bound = 0.0;
+    double sum_solve = 0.0;
+    double sum_set = 0.0;
     for(int iter = 0; iter < maxIterNum; ++iter) {
         ceres::Problem problem;
         vector<pair<Parameter, Parameter>> parameters;
         vector<double> point_dists;
+        auto t1 = std::chrono::high_resolution_clock::now();
         double current_sq_dist = findFootPrint(givepoints, parameters,point_dists);
+        sum_fp += ms_since(t1);
+        t1 = std::chrono::high_resolution_clock::now();
         double diff = last_error - current_sq_dist;
         double relative_decrease = std::abs(diff) / (last_error + 1e-10); // 防止除0
         double rmse = (current_sq_dist / point_num); // 均方根误差(平均距离)
@@ -727,12 +781,12 @@ double BSplineSurface::apply(
         // 例如：如果你传入的 eplison 是 1e-3 (0.1%)，当提升小于这个比例时停止
         // iter > 0 是为了防止第一次 last_error 为初始值时的误判
         if (iter > 0 && relative_decrease < eplison) {
-            std::cout << ">> Converged by Relative Decrease (" << relative_decrease << " < " << eplison << ")" << std::endl;
+            //std::cout << ">> Converged by Relative Decrease (" << relative_decrease << " < " << eplison << ")" << std::endl;
             vector<Vector3d> controls_copy = controls; // <--- ✅ 先克隆一份
 
             if (!stop_flag) {
                 stop_flag = true;
-                std::cout<<"ready to stop "<<std::endl;
+                //std::cout<<"ready to stop "<<std::endl;
             }
             else {
                 setNewControl(controls_copy, controls_num_u, controls_num_v,true);
@@ -744,7 +798,7 @@ double BSplineSurface::apply(
         // 这里的 1e-3 代表平均误差小于 0.001 (假设单位是米，即1mm)
         // 你可以根据你的点云尺度调整这个值
         if (rmse < 1e-2) {
-            std::cout << ">> Converged by RMSE (" << rmse << " < 1e-3)" << std::endl;
+            //std::cout << ">> Converged by RMSE (" << rmse << " < 1e-3)" << std::endl;
             vector<Vector3d> controls_copy = controls; // <--- ✅ 先克隆一份
             if (!stop_flag) {
                 stop_flag = true;
@@ -770,9 +824,16 @@ double BSplineSurface::apply(
         auto [med, mad] = computeMAD(point_dists);
         double sigma = 1.4826 * mad + 1e-6;
         double inlier_thresh = med + 2.5 * sigma;
-
-        for( int i = 0; i< parameters.size(); i++)
+        sum_pre += ms_since(t1);
+        t1 = std::chrono::high_resolution_clock::now();
+        std::vector<double> active_weights;
+        std::vector<double*> active_cp_pointers;
+        active_weights.reserve(16);
+        active_cp_pointers.reserve(16);
+        for(int i = 0; i< parameters.size(); i++)
         {
+            active_weights.clear();
+            active_cp_pointers.clear();
             if (point_dists[i] > inlier_thresh) {
                 continue; // 直接当噪声，跳过
             }
@@ -782,8 +843,7 @@ double BSplineSurface::apply(
             surf_info.point = getPos(paraU, paraV, knots_u, knots_v,controls,controls_num_v);
             int span_u = paraU.first;
             int span_v = paraV.first;
-            std::vector<double> active_weights;
-            std::vector<double*> active_cp_pointers;
+
             Matrix4d mat_coeff_u = ComputeNonUniformBsplineMatrix(span_u, knots_u);
             Matrix4d mat_coeff_v = ComputeNonUniformBsplineMatrix(span_v, knots_v);
             double dt_u = knots_u[span_u + 1] - knots_u[span_u];
@@ -801,22 +861,21 @@ double BSplineSurface::apply(
                 {
                     int flat_index = (span_u -3 + l) * controls_num_v + span_v - 3 + m;
                     if (flat_index < 0 || flat_index >= controls.size()) {
-                        // 如果越界，说明 u,v 算错了，跳过这个无效项，保命要紧
                         continue;
                     }
                     active_cp_pointers.push_back(controls[flat_index].data());
-
                     active_weights.push_back(w_u(l)*w_v(m));
-
                 }
             }
+
             ceres::CostFunction* cost_func = new BSplineSDMErr(givepoints[i], surf_info, active_weights);
             ceres::LossFunction* loss = new ceres::HuberLoss(0.05);
             problem.AddResidualBlock(cost_func, loss, active_cp_pointers);
             // 1. U 方向平滑 (行约束)
             // 遍历每一行，对中间的点加约束
-
         }
+        sum_data_res += ms_since(t1);
+        t1 = std::chrono::high_resolution_clock::now();
         double smooth_weight = 0.03;
         for (int i = 0; i < controls_num_u; ++i) {
             for (int j = 1; j < controls_num_v - 1; ++j) {
@@ -854,6 +913,9 @@ double BSplineSurface::apply(
             }
         }
 
+        sum_smooth += ms_since(t1);
+
+        t1 = std::chrono::high_resolution_clock::now();
 
         Vector3d min_p(min_x, min_y, min_z);
         Vector3d max_p(max_x, max_y, max_z);
@@ -865,16 +927,31 @@ double BSplineSurface::apply(
             problem.AddResidualBlock(b, nullptr, controls[i].data());
         }
 
+        sum_bound += ms_since(t1);
         ceres::Solver::Options options;
-        options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
-        options.max_num_iterations = 5; // 关键点！
+        options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+        options.num_threads = 4;
+        options.max_num_iterations = 1; // 关键点！
+        options.minimizer_progress_to_stdout = true;
         ceres::Solver::Summary summary;
+        t1 = std::chrono::high_resolution_clock::now();
         ceres::Solve(options, &problem, &summary);
-        std::cout << summary.BriefReport() << std::endl;
+        sum_solve += ms_since(t1);
+        t1 = std::chrono::high_resolution_clock::now();
+        //std::cout << summary.FullReport() << std::endl;
         vector<Vector3d> controls_copy = controls; // <--- ✅ 先克隆一份
         setNewControl(controls_copy, controls_num_u, controls_num_v);
+        sum_set += ms_since(t1);
     }
-
+    std::cout << std::fixed << std::setprecision(2)
+          << "sum_fp=" << sum_fp
+          << "ms sum_pre=" << sum_pre
+          << "ms sum_data_res=" << sum_data_res
+          << "ms sum_smooth=" << sum_smooth
+          << "ms sum_bound=" << sum_bound
+          << "ms sum_solve=" << sum_solve
+          << "ms sum_set=" << sum_set
+          << "ms" << std::endl;
     // 在 apply 函数的 return last_error; 之前加入：
 
 

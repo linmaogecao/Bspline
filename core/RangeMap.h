@@ -15,7 +15,7 @@
 #include <pcl/common/common.h>
 #include <opencv4/opencv2/opencv.hpp>
 #include <Eigen/Eigenvalues>
-
+#include <opencv2/opencv.hpp>
 
 // OpenMP 用于加速
 #include <omp.h>
@@ -136,6 +136,15 @@ public:
 
     // 把每个 SubCluster 转成 PCL 点云, 顺序与 vc.sub_clusters 一致
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> generateSubClusterClouds(const VoxelizedClusters& vc) const;
+    std::vector<Eigen::Vector3d> extractClusterBoundary3D(const SegmentationResult& result, int cluster_id,
+    int K_ring) const;
+
+    // 基于 range image 行列结构为指定 cluster 生成 num_u × num_v 初始控制点网格。
+    // 不做 PCA/平面投影，直接从真实 xyz 采样，适配垂直墙面和直角拐角。
+    // smooth_window: 沿 ring 方向对 col_lo/col_hi 做中值平滑的半窗口大小（去噪声毛刺）
+    std::vector<Eigen::Vector3d> computeInitControlPoints(
+        const SegmentationResult& result, int cluster_id,
+        int num_u, int num_v, int smooth_window = 2) const;
 };
 
 

@@ -183,7 +183,7 @@ int main(int argc, char *argv[]){
     string outFileName3 = "hull.txt";
 
 
-    BSplineSurface surface(3,3,15,15,0.25);
+    BSplineSurface surface(3,3,8,8,0.05);
 
 
     std::vector<Vector3d> points;
@@ -219,7 +219,7 @@ int main(int argc, char *argv[]){
     // std::cout << "正在生成测试点云..." << std::endl;
     RangeImageProcessor t1;
     t1.generateRangeImage(cloud);
-    SegmentationResult result = t1.segmentRangeImage(5,80,60,0.1,10);
+    SegmentationResult result = t1.segmentRangeImage(5,80,60,0.1,30);
     t1.saveClustersToTxt(result, "output_clusters");
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clouds = t1.generateClusterClouds(result);
 
@@ -233,21 +233,71 @@ int main(int argc, char *argv[]){
     //     readWrite::writeDate( outFileName1, surface.getControls(),true);
     //     readWrite::writeDate( outFileName2, surface.getSamples(),true );
     // }
-    int indexx = std::stoi(index_num);
-    surface.apply(clouds[indexx], 50,1,1,0.05);
+    // auto total_start = std::chrono::high_resolution_clock::now();
+    // for (int i_1 = 0; i_1 < (int)clouds.size(); ++i_1) {
+    //     auto t0 = std::chrono::high_resolution_clock::now();
+    //     int ref_num = int(sqrt(clouds[i_1]->size()));
+    //     if (ref_num <8) ref_num -=2;
+    //     else if (ref_num < 15) ref_num -= 3;
+    //     else if (ref_num < 22) ref_num -= 5;
+    //
+    //     ref_num = ref_num < 5 ? 5 : ref_num;
+    //     ref_num = ref_num > 20 ? 20 : ref_num;
+    //     BSplineSurface surf_local(3, 3, ref_num, ref_num, 0.25);
+    //     auto init_cp = t1.computeInitControlPoints(result, i_1,
+    //                                                /*num_u=*/surf_local.controls_num_u, /*num_v=*/surf_local.controls_num_v,
+    //                                                /*smooth_window=*/2);
+    //     if (!init_cp.empty()) {
+    //         surf_local.setExternalInitControls(init_cp);// new object each time, avoid state leak
+    //         surf_local.apply(clouds[i_1], 50, 1, 1, 0.05);
+    //         auto t1 = std::chrono::high_resolution_clock::now();
+    //         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    //         // std::cout << "cluster " << i_1 << " / " << clouds.size()
+    //         //           << "  pts=" << clouds[i_1]->size()
+    //         //           << "  time=" << ms << " ms" << std::endl;
+    //         readWrite::writeDate("output_result/cluster_" + std::to_string(i_1) + ".txt",
+    //                              surf_local.getSamples(), false);
+    //     }
+    // }
+    // auto total_end = std::chrono::high_resolution_clock::now();
+    // std::cout << "total: "
+    //           << std::chrono::duration<double, std::milli>(total_end - total_start).count()
+    //           << " ms" << std::endl;
+    int indexx = atoi(index_num);
+
+    // 用 range-image 行列结构初始化控制点，不依赖 PCA 平面投影，支持垂直墙/直角拐角
+    {
+        auto init_cp = t1.computeInitControlPoints(result, indexx,
+                                                   /*num_u=*/surface.controls_num_u, /*num_v=*/surface.controls_num_v,
+                                                   /*smooth_window=*/2);
+        if (!init_cp.empty()) {
+            surface.setExternalInitControls(init_cp);
+            readWrite::writeDate("./../build/initial_control.txt", init_cp, false);
+        }
+        else {
+            std::cerr << "警告: 未能提取到初始控制点!" << std::endl;
+        }
+    }
+    surface.apply(clouds[indexx], 10,1,1,0.15);
+    readWrite::writeDate(inFileName, clouds[indexx],false);
     readWrite::writeDate( outFileName1, surface.getControls(),false);
     readWrite::writeDate( outFileName2, surface.getSamples(),false );
-
-    // PCA 投影 + 2D 栅格化 + Moore 边界追踪 -> 有序边界点 (闭合)
-    // cell_size 根据点云密度调; LiDAR 墙面 cluster 一般 0.1~0.3m 比较合适
-    points2 = extractOrderedBoundary(clouds[indexx], /*cell_size=*/0.1, /*pad_cells=*/1);
-    if (points2.empty()) {
-        std::cerr << "警告: 未能提取到有序边界点!" << std::endl;
-    } else {
-        std::cout << "提取到 " << points2.size() << " 个有序边界点" << std::endl;
-    }
-
-    readWrite::writeDate(outFileName3, points2, false);
+    //
+    //
+    // points2 = t1.extractClusterBoundary3D(result, indexx, /*pad=*/1);
+    // if (points2.empty()) {
+    //     std::cerr << "警告: 未能提取到有序边界点!" << std::endl;
+    // } else {
+    //     std::cout << "提取到 " << points2.size() << " 个有序边界点" << std::endl;
+    // }
+    //
+    // readWrite::writeDate(outFileName3, points2, false);
+    //
+    //
+    // for (int k = 0; k < result.clusters.size(); k++) {
+    //     points2 = t1.extractClusterBoundary3D(result, k, /*pad=*/3);
+    //     readWrite::writeDate("output_hull/cluster_" + std::to_string(k) + ".txt", points2, false);
+    // }
     // std::cout << "正在写入点云数据..." << std::endl;
     // std::vector<Vector3d> points_out2;
     // points_out2.resize(5000);

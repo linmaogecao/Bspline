@@ -11,7 +11,9 @@
 #include <pcl/surface/concave_hull.h>
 #include <tool.h>
 #include <map>
-
+#include <chrono>
+#include <iomanip>
+#include <readWrite.h>
 
 using namespace std;
 using namespace Eigen;
@@ -229,6 +231,12 @@ public:
     void initControlPointPCA(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud,
                              vector<Vector3d>& controlPs, int num_u, int num_v,
                              double margin_ratio = 0.15);
+
+    // 在 apply() 之前调用，提供外部算好的初始控制点（如 range-image 行列采样结果）。
+    // 大小须等于 num_u * num_v；若不匹配则回退到内部 initControlPoint。
+    void setExternalInitControls(const std::vector<Vector3d>& init_cp) {
+        ext_init_controls_ = init_cp;
+    }
     const PlaneFrame& getPlaneFrame() const { return plane_frame_; }
     void setNewControl(const vector<Vector3d> &controlPs, int num_u, int num_v,bool isCut = false);
     void setKnotParams(int num_cp_u,int num_cp_v);
@@ -257,7 +265,9 @@ private:
 
     // PCA + (u,v) 投影范围统计, 填充 plane_frame_
     void computePlaneFrame(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud);
-
+public:
+    int controls_num_u;
+    int controls_num_v;
 private:
     double interal_u;
     double interal_v;
@@ -267,8 +277,7 @@ private:
     std::vector<double> knots_v;
     int Deg_u;
     int Deg_v;
-    int controls_num_u;
-    int controls_num_v;
+
     double interal_;
     double max_x,max_y,max_z;
     double min_x,min_y,min_z;
@@ -286,4 +295,5 @@ private:
     int cn2 = 0;
     int cn3 = 0;
     PlaneFrame plane_frame_;
+    std::vector<Vector3d> ext_init_controls_;
 };

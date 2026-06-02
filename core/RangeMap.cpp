@@ -235,11 +235,11 @@ SegmentationResult RangeImageProcessor::segmentRangeImage(double theta_deg, doub
 
 void RangeImageProcessor::saveClustersToTxt(const SegmentationResult& result, const std::string& folder_path) {
     if (result.clusters.empty()) {
-        std::cout << "No clusters to save!" << std::endl;
+        //std::cout << "No clusters to save!" << std::endl;
         return;
     }
 
-    std::cout << "Saving " << result.clusters.size() << " clusters to " << folder_path << " ..." << std::endl;
+    //std::cout << "Saving " << result.clusters.size() << " clusters to " << folder_path << " ..." << std::endl;
 
     // 遍历每一个聚类
     for (size_t i = 0; i < result.clusters.size(); ++i) {
@@ -270,7 +270,7 @@ void RangeImageProcessor::saveClustersToTxt(const SegmentationResult& result, co
         outfile.close();
     }
 
-    std::cout << "All clusters saved." << std::endl;
+    //std::cout << "All clusters saved." << std::endl;
 }
 
 bool RangeImageProcessor::findValidNeighborPt(int u, int v, const Eigen::Vector3d& center_pt, Eigen::Vector3d &neighbor_pt, bool is_vertical, int dir) const {
@@ -465,11 +465,7 @@ VoxelizedClusters RangeImageProcessor::voxelizeClusters(const SegmentationResult
         }
     }
 
-    std::cout << "[Voxelize] voxel_size=" << voxel_size
-              << "  voxels=" << vc.voxels.size()
-              << "  sub_clusters=" << vc.sub_clusters.size()
-              << "  source_clusters=" << vc.cluster_to_subclusters.size()
-              << std::endl;
+
     return vc;
 }
 
@@ -537,4 +533,201 @@ RangeImageProcessor::generateSubClusterClouds(const VoxelizedClusters& vc) const
         clouds.push_back(cloud);
     }
     return clouds;
+}
+
+std::vector<Eigen::Vector3d> RangeImageProcessor::computeInitControlPoints(
+    const SegmentationResult& result, int cluster_id,
+    int num_u, int num_v, int smooth_window) const
+{
+    std::vector<Eigen::Vector3d> controlPs(num_u * num_v, Eigen::Vector3d::Zero());
+    if (cluster_id < 0 || cluster_id >= (int)result.clusters.size()) return controlPs;
+    const auto& idxs = result.clusters[cluster_id];
+    // ---- 1. 接缝处理：找最长连续空列段，旋转列方向使 cluster 在列方向连续 ----
+    std::vector<char> col_used(W_COLS, 0);
+    for (int idx : idxs) col_used[idx % W_COLS] = 1;
+
+    int best_start = 0, best_len = 0, run = 0, run_start = 0;
+    for (int k = 0; k < 2 * W_COLS; ++k) {
+        if (!col_used[k % W_COLS]) {
+            if (run == 0) run_start = k % W_COLS;
+            if (++run > best_len) { best_len = run; best_start = run_start; }
+        } else run = 0;
+    }
+    int shift = (best_len > 0) ? ((best_start + best_len) % W_COLS) : 0;
+    auto shiftCol   = [&](int v) { return (v - shift + W_COLS) % W_COLS; };
+    auto unshiftCol = [&](int sv){ return (sv + shift) % W_COLS; };
+
+    // ---- 2. 统计每行的 col_lo / col_hi ----
+    std::vector<int> col_lo(H_SCANS, W_COLS);
+    std::vector<int> col_hi(H_SCANS, -1);
+    int u_min = H_SCANS, u_max = -1;
+
+    for (int raw_idx : idxs) {
+        int u  = raw_idx / W_COLS;
+        int sv = shiftCol(raw_idx % W_COLS);
+        col_lo[u] = std::min(col_lo[u], sv);
+        col_hi[u] = std::max(col_hi[u], sv);
+        u_min = std::min(u_min, u);
+        u_max = std::max(u_max, u);
+    }
+
+    // ---- 3. 填充空行（线性插值）+ 中值平滑，使 col_lo/col_hi 稳定 ----
+    auto smoothBound = [&](std::vector<int>& arr, int fill_sentinel, bool is_min) {
+        // 先线性插值填充空行
+        int prev = -1;
+        for (int u = u_min; u <= u_max; ++u) {
+            if (arr[u] != fill_sentinel) {
+                if (prev < 0) {
+                    for (int k = u_min; k < u; ++k) arr[k] = arr[u];
+                } else if (u > prev + 1) {
+                    int v0 = arr[prev], v1 = arr[u];
+                    for (int k = prev + 1; k < u; ++k) {
+                        double t = (double)(k - prev) / (u - prev);
+                        arr[k] = (int)std::round(v0 + t * (v1 - v0));
+                    }
+                }
+                prev = u;
+            }
+        }
+        if (prev >= 0)
+            for (int k = prev + 1; k <= u_max; ++k) arr[k] = arr[prev];
+
+        // 中值平滑（半窗口 smooth_window）
+        std::vector<int> tmp = arr;
+        for (int u = u_min; u <= u_max; ++u) {
+            std::vector<int> win;
+            for (int d = -smooth_window; d <= smooth_window; ++d) {
+                int k = u + d;
+                if (k >= u_min && k <= u_max) win.push_back(tmp[k]);
+            }
+            std::sort(win.begin(), win.end());
+            arr[u] = win[win.size() / 2];
+        }
+    };
+
+    smoothBound(col_lo, W_COLS, true);
+    smoothBound(col_hi, -1,     false);
+
+    // ---- 4. 收集有效行 ----
+    std::vector<int> valid_rings;
+    valid_rings.reserve(u_max - u_min + 1);
+    for (int u = u_min; u <= u_max; ++u)
+        if (col_hi[u] >= col_lo[u]) valid_rings.push_back(u);
+
+    //if ((int)valid_rings.size() < num_u) return controlPs;
+
+    // ---- 5. 查 range image：取真实 xyz，空格搜邻居 ----
+    auto getPoint3D = [&](int ring, int shifted_col) -> Eigen::Vector3d {
+        int orig = unshiftCol(shifted_col);
+        // 同行优先
+        for (int d = 0; d <= 10; ++d) {
+            for (int s : {0, 1, -1}) {
+                if (d == 0 && s != 0) continue;
+                int c2 = (orig + s * d + W_COLS) % W_COLS;
+                const auto& px = range_image_[ring * W_COLS + c2];
+                if (px.valid) return {px.x, px.y, px.z};
+            }
+        }
+        // 相邻 ring
+        for (int dr = 1; dr <= 2; ++dr) {
+            for (int sr : {1, -1}) {
+                int r2 = ring + sr * dr;
+                if (r2 < 0 || r2 >= H_SCANS) continue;
+                const auto& px = range_image_[r2 * W_COLS + orig];
+                if (px.valid) return {px.x, px.y, px.z};
+            }
+        }
+        return Eigen::Vector3d::Zero();
+    };
+
+    // ---- 6. 均匀选 num_u 行 × num_v 列，填充控制点网格 ----
+    int n_valid = (int)valid_rings.size();
+    for (int i = 0; i < num_u; ++i) {
+        int vi = (int)std::round((double)i * (n_valid - 1) / (num_u - 1));
+        vi = std::max(0, std::min(vi, n_valid - 1));
+        int ring = valid_rings[vi];
+        int lo = col_lo[ring], hi = col_hi[ring];
+
+        for (int j = 0; j < num_v; ++j) {
+            int sv = (num_v > 1)
+                ? (int)std::round(lo + (double)j * (hi - lo) / (num_v - 1))
+                : lo;
+            sv = std::max(lo, std::min(sv, hi));
+            controlPs[i * num_v + j] = getPoint3D(ring, sv);
+        }
+    }
+
+    return controlPs;
+}
+
+std::vector<Eigen::Vector3d> RangeImageProcessor::extractClusterBoundary3D(const SegmentationResult& result, int cluster_id,
+    int K_ring) const {
+std::vector<Eigen::Vector3d> out;
+    if (cluster_id < 0 || cluster_id >= (int)result.clusters.size()) return out;
+    const auto& idxs = result.clusters[cluster_id];
+    if ((int)idxs.size() < 3) return out;
+    // ---- 1. 接缝处理:找最长空列段,旋转列方向使 cluster 在列方向连续 ----
+    std::vector<char> col_used(W_COLS, 0);
+    for (int idx : idxs) col_used[idx % W_COLS] = 1;
+    int best_start = 0, best_len = 0, run = 0, run_start = 0;
+    for (int k = 0; k < 2 * W_COLS; ++k) {
+        if (!col_used[k % W_COLS]) {
+            if (run == 0) run_start = k % W_COLS;
+            if (++run > best_len) { best_len = run; best_start = run_start; }
+        } else run = 0;
+    }
+    int shift = (best_len > 0) ? ((best_start + best_len) % W_COLS) : 0;
+    auto shiftCol = [&](int v) { return (v - shift + W_COLS) % W_COLS; };
+    // ---- 2. 每行统计 col_lo / col_hi ----
+    std::vector<int> col_lo(H_SCANS, W_COLS);
+    std::vector<int> col_hi(H_SCANS, -1);
+    int u_min = H_SCANS, u_max = -1;
+    for (int idx : idxs) {
+        int u  = idx / W_COLS;
+        int sv = shiftCol(idx % W_COLS);   // 旋转后的列
+        col_lo[u] = std::min(col_lo[u], sv);
+        col_hi[u] = std::max(col_hi[u], sv);
+        u_min = std::min(u_min, u);
+        u_max = std::max(u_max, u);
+    }
+    // ---- 3. 收集有效行 (每隔 K_ring 取一行,空行跳过) ----
+    std::vector<int> valid_rings;
+    for (int u = u_min; u <= u_max; u += K_ring) {
+        if (col_hi[u] >= col_lo[u]) valid_rings.push_back(u);
+    }
+    // 确保最后一行也包含
+    if (!valid_rings.empty() && valid_rings.back() != u_max && col_hi[u_max] >= col_lo[u_max])
+        valid_rings.push_back(u_max);
+    if (valid_rings.size() < 2) return out;
+    // ---- 4. 构建多边形:左边 lo 从上到下,右边 hi 从下到上 ----
+    // 把旋转后的列还原成原始列:orig = (sv + shift) % W_COLS
+    auto unshiftCol = [&](int sv) { return (sv + shift) % W_COLS; };
+    auto getPoint3D = [&](int u, int sv) -> Eigen::Vector3d {
+        int orig_col = unshiftCol(sv);
+        int ridx = u * W_COLS + orig_col;
+        // 如果该格无效,在同行内线性搜最近有效点
+        if (range_image_[ridx].valid) {
+            const auto& px = range_image_[ridx];
+            return {px.x, px.y, px.z};
+        }
+        // 向两侧各搜 5 格
+        for (int d = 1; d <= 5; ++d) {
+            for (int sign : {1, -1}) {
+                int c2 = (orig_col + sign * d + W_COLS) % W_COLS;
+                int r2 = u * W_COLS + c2;
+                if (range_image_[r2].valid) {
+                    const auto& px = range_image_[r2];
+                    return {px.x, px.y, px.z};
+                }
+            }
+        }
+        return Eigen::Vector3d::Zero();   // 实在找不到就原点(极少发生)
+    };
+    // 左边界:lo 从上到下
+    for (int u : valid_rings)
+        out.push_back(getPoint3D(u, col_lo[u]));
+    // 右边界:hi 从下到上(反向)
+    for (int i = (int)valid_rings.size() - 1; i >= 0; --i)
+        out.push_back(getPoint3D(valid_rings[i], col_hi[valid_rings[i]]));
+    return out;   // 首尾相连即为闭合多边形
 }
